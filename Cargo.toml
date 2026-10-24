@@ -1,0 +1,11 @@
+[package]
+name = "drydock"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "A robot's motors on a virtual CAN bus, their physics simulated in MuJoCo"
+
+[dependencies]
+libc = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_yaml = "0.9"

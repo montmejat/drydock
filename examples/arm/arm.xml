@@ -1,0 +1,32 @@
+<!-- Two joints in a vertical plane, held out level at zero: a shoulder that
+     carries the whole arm against gravity, and an elbow. The mechanics
+     (masses, rotor inertia as armature, damping, friction) live here; what
+     drives the joints lives in robot.yml. -->
+<mujoco model="arm">
+  <option timestep="0.0005" integrator="implicitfast"/>
+
+  <default>
+    <joint type="hinge" axis="0 1 0" armature="0.01" damping="0.05" frictionloss="0.02"/>
+    <geom type="capsule" size="0.02" contype="0" conaffinity="0" rgba="0.75 0.75 0.8 1"/>
+  </default>
+
+  <worldbody>
+    <light pos="0 0 2"/>
+    <geom name="floor" type="plane" size="1 1 0.1" contype="1" conaffinity="1" rgba="0.2 0.2 0.25 1"/>
+    <body name="base" pos="0 0 0.6">
+      <geom type="cylinder" size="0.04 0.04" euler="90 0 0" rgba="0.3 0.3 0.35 1"/>
+      <body name="upper_arm">
+        <joint name="shoulder"/>
+        <geom fromto="0 0 0 0.25 0 0" mass="0.6"/>
+        <body name="forearm" pos="0.25 0 0">
+          <joint name="elbow"/>
+          <geom fromto="0 0 0 0.2 0 0" mass="0.3"/>
+        </body>
+      </body>
+    </body>
+  </worldbody>
+
+  <keyframe>
+    <key name="home" qpos="0 0"/>
+  </keyframe>
+</mujoco>
