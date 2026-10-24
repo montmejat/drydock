@@ -7,6 +7,7 @@ use crate::can::Frame;
 use crate::damiao::bus::Motors;
 use crate::damiao::motor::Motor;
 use crate::drivetrain::{Actuator, Drivetrain};
+use crate::effects::Encoder;
 use crate::robot::Robot;
 use crate::world::World;
 
@@ -30,9 +31,9 @@ impl Drydock {
             world.keyframe(k)?;
         }
         let mut buses = Vec::new();
-        for spec in &robot.buses {
+        for (b, spec) in robot.buses.iter().enumerate() {
             let (mut motors, mut drivetrains) = (Vec::new(), Vec::new());
-            for m in &spec.motors {
+            for (i, m) in spec.motors.iter().enumerate() {
                 let joint = world.joint(&m.joint)?;
                 if world.release_actuators(joint) > 0 {
                     eprintln!("drydock: the scene's actuator(s) on `{}` are off: its motor drives it", m.joint);
@@ -40,7 +41,10 @@ impl Drydock {
                 let timeout = m.timeout_ms.map(|ms| ms / 1e3);
                 motors.push(Motor::new(m.joint.clone(), m.id, m.master_id, m.limits(), timeout));
                 let actuator = Actuator { peak_torque: m.peak_torque() };
-                drivetrains.push(Drivetrain { joint, actuator, transmission: m.transmission });
+                // Each motor's own noise, the same every run.
+                let seed = robot.seed ^ (((b as u64) << 32) | (i as u64 + 1));
+                let encoder = Encoder::new(m.encoder, seed);
+                drivetrains.push(Drivetrain { joint, actuator, transmission: m.transmission, encoder, fault: m.fault });
             }
             let heard = vec![false; motors.len()];
             buses.push(Bus { motors: Motors::new(motors, spec.fd), drivetrains, heard });
@@ -71,11 +75,11 @@ impl Drydock {
     pub fn deliver(&mut self, bus: usize, frame: &Frame) -> Option<Frame> {
         let now = self.world.time();
         let (world, b) = (&self.world, &mut self.buses[bus]);
-        let drivetrains = &b.drivetrains;
+        let drivetrains = &mut b.drivetrains;
         let state = |i: usize| {
-            let d = drivetrains[i];
+            let d = &mut drivetrains[i];
             let (q, v) = world.state(d.joint);
-            d.transmission.to_motor(q, v)
+            d.sense(now, q, v)
         };
         let delivery = b.motors.deliver(frame, now, state)?;
         b.heard[delivery.motor] = true;
@@ -86,11 +90,11 @@ impl Drydock {
     pub fn step(&mut self) {
         let now = self.world.time();
         for b in &mut self.buses {
-            for (i, d) in b.drivetrains.iter().enumerate() {
+            for (i, d) in b.drivetrains.iter_mut().enumerate() {
                 let (q, v) = self.world.state(d.joint);
-                let (theta, omega) = d.transmission.to_motor(q, v);
+                let (theta, omega) = d.sense(now, q, v);
                 let motor = b.motors.motor_mut(i);
-                let torque = d.actuator.torque(motor.law(now, theta, omega));
+                let torque = d.torque(now, motor.law(now, theta, omega));
                 motor.applied(torque);
                 self.world.set_force(d.joint, d.transmission.to_joint(torque));
             }

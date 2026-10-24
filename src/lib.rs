@@ -7,6 +7,7 @@
 //! - `run`: the clock, real time or lockstep, over every bus;
 //! - `damiao`: Damiao's protocol, one motor's firmware, the motors on a bus;
 //! - `drivetrain`: what limits a motor's torque, and how it moves its joint;
+//! - `effects`: an imperfect encoder, and how a motor breaks;
 //! - `world`: MuJoCo;
 //! - `dock`: the robot, putting them together;
 //! - `robot`: the robot file.
@@ -15,6 +16,7 @@ pub mod can;
 pub mod damiao;
 pub mod dock;
 pub mod drivetrain;
+pub mod effects;
 pub mod robot;
 pub mod run;
 pub mod world;

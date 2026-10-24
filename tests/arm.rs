@@ -137,3 +137,60 @@ fn a_robot_on_can_fd_answers_in_it_and_understands_classic_frames() {
         assert_eq!(feedback(&robot, answer).status, status::ENABLED);
     }
 }
+
+#[test]
+fn a_dead_motor_lets_go_though_its_firmware_is_enabled() {
+    let mut robot = Robot::load(concat!(env!("CARGO_MANIFEST_DIR"), "/examples/arm/robot.yml")).unwrap();
+    robot.break_motor("shoulder:dead@0.5").unwrap();
+    let mut dock = Drydock::load(&robot).unwrap();
+    cycle(&mut dock, &enable(&robot), 0.001);
+    let mut answers = Vec::new();
+    for _ in 0..1500 {
+        answers = cycle(&mut dock, &hold(&robot, -0.3), 0.001);
+    }
+    let shoulder = feedback(&robot, answers[0]);
+    assert_eq!(shoulder.status, status::ENABLED);
+    assert!(shoulder.t.abs() < 0.02, "it gives nothing: {shoulder:?}");
+    assert!(shoulder.p > 0.5, "the arm hangs: {shoulder:?}");
+}
+
+#[test]
+fn a_frozen_encoder_reads_the_same_wherever_the_joint_goes() {
+    let mut robot = Robot::load(concat!(env!("CARGO_MANIFEST_DIR"), "/examples/arm/robot.yml")).unwrap();
+    robot.break_motor("shoulder:freeze@1").unwrap();
+    let mut dock = Drydock::load(&robot).unwrap();
+    cycle(&mut dock, &enable(&robot), 0.001);
+    let mut answers = Vec::new();
+    for _ in 0..1500 {
+        answers = cycle(&mut dock, &hold(&robot, -0.3), 0.001);
+    }
+    let frozen = feedback(&robot, answers[0]);
+    for _ in 0..500 {
+        answers = cycle(&mut dock, &hold(&robot, 0.3), 0.001);
+    }
+    let later = feedback(&robot, answers[0]);
+    assert_eq!(later.p, frozen.p, "{frozen:?} {later:?}");
+    // Still, to a 12-bit quantum: the packing has no exact zero.
+    assert!(later.v.abs() < 16.0 / 4095.0, "{later:?}");
+    // Its law, closed on the frozen reading, pushes as hard as it may.
+    assert!(later.t > 20.0, "{later:?}");
+}
+
+#[test]
+fn noisy_encoders_repeat_with_their_seed() {
+    let run = |noise: f64| {
+        let mut robot = Robot::load(concat!(env!("CARGO_MANIFEST_DIR"), "/examples/arm/robot.yml")).unwrap();
+        for m in &mut robot.buses[0].motors {
+            m.encoder.noise = noise;
+            m.encoder.quantum = 0.0004;
+        }
+        let mut dock = Drydock::load(&robot).unwrap();
+        let mut all = cycle(&mut dock, &enable(&robot), 0.001);
+        for _ in 0..300 {
+            all.extend(cycle(&mut dock, &hold(&robot, 0.2), 0.001));
+        }
+        all
+    };
+    assert_eq!(run(0.002), run(0.002));
+    assert_ne!(run(0.002), run(0.0));
+}

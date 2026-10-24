@@ -47,8 +47,9 @@ impl Motors {
     }
 
     /// A frame reached the motors at `now`: which one it was for, and its
-    /// answer. `state(i)` is motor `i`'s angle and velocity.
-    pub fn deliver(&mut self, frame: &Frame, now: f64, state: impl Fn(usize) -> (f64, f64)) -> Option<Delivery> {
+    /// answer. `state(i)` is motor `i`'s angle and velocity, as it senses
+    /// them.
+    pub fn deliver(&mut self, frame: &Frame, now: f64, mut state: impl FnMut(usize) -> (f64, f64)) -> Option<Delivery> {
         if frame.fd && !self.can_fd {
             self.say(format!(
                 "a CAN FD frame to {:#05x}, but the motors are on classic CAN (can_fd: false): ignored",

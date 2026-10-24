@@ -81,6 +81,8 @@ buses:
       - { joint: shoulder, model: DM4340, id: 0x01, master_id: 0x11 }
       - { joint: elbow, model: DM4310, id: 0x02, master_id: 0x12, peak_torque: 7, timeout_ms: 100 }
       - { joint: finger, model: DM4310, id: 0x08, master_id: 0x18, transmission: { ratio: 0.042, offset: 0.044 } }
+      - { joint: wrist, model: DM4310, id: 0x03, master_id: 0x13, encoder: { noise: 0.0005, quantum: 0.0004 }, fault: dead@10 }
+seed: 0                     # optional: for the encoders' noise
 ```
 
 A bus:
@@ -108,6 +110,14 @@ A motor:
   only the range torque is packed into: a DM-J4310 peaks at 7 N m, not 10.
 - `timeout_ms`: without a frame for this long, the motor disables itself with
   status `D` (communication lost). Off by default.
+- `encoder: { delay_ms, bias, drift, noise, quantum }`: what the motor's
+  encoder gets wrong, in radians (perfect by default). Its firmware closes
+  its loop on that reading, and answers with it. Seeded: a run repeats.
+- `fault`: how and when it breaks, in simulated seconds: `dead@10` (no
+  torque), `weak@10` (a fifth of it), `freeze@10` (the encoder repeats its
+  last reading), `noisy@10` (its noise twentyfold). Or on the command line:
+  `drydock robot.yml --break elbow:freeze@10`. A broken motor still says
+  it's enabled: finding out is the bus master's job.
 - `transmission: { ratio, offset }`: when the motor and its joint don't turn
   together. The joint is at `offset + ratio θ` when the motor is at `θ`, and
   a motor torque `τ` puts `τ / ratio` on the joint. A gripper whose rotary
@@ -132,8 +142,8 @@ Not yet, or not at all:
 - **Registers other than the six above** get no answer, with a note. That
   includes `TIMEOUT` (9): its units aren't in the sources below, so the
   timeout is set in the robot file instead.
-- **Temperatures** are always 25 °C. Nothing overheats, and no fault but
-  communication loss happens on its own.
+- **Temperatures** are always 25 °C. Nothing overheats; faults are on a
+  flag, and only communication loss happens on its own.
 
 ## Time
 
@@ -168,7 +178,8 @@ the others complete.
 | `src/can/` | frames and SocketCAN; `timing.rs`, how long frames take and in what order |
 | `src/run.rs` | the clock: real time or lockstep, over every bus |
 | `src/damiao/` | `protocol.rs`, the frames; `motor.rs`, one motor's firmware; `bus.rs`, the motors on one bus |
-| `src/drivetrain.rs` | what limits a motor's torque, and how it moves its joint |
+| `src/drivetrain.rs` | what limits a motor's torque, how it moves its joint, what it senses |
+| `src/effects.rs` | an imperfect encoder, and how a motor breaks |
 | `src/world.rs`, `shim/world.c` | MuJoCo, through a small C shim, so Rust mirrors none of its structs |
 | `src/dock.rs` | the robot: buses of motors on the world's joints |
 | `src/robot.rs` | the robot file |

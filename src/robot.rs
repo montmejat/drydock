@@ -16,6 +16,9 @@
 //!       - { joint: elbow, model: DM4310, id: 0x02, master_id: 0x12, peak_torque: 7, timeout_ms: 100 }
 //!       # A gripper: the motor's angle moves a finger along a slide.
 //!       - { joint: finger, model: DM4310, id: 0x08, master_id: 0x18, transmission: { ratio: 0.042, offset: 0.044 } }
+//!       # An imperfect encoder, and a motor that dies ten seconds in.
+//!       - { joint: wrist, model: DM4310, id: 0x03, master_id: 0x13, encoder: { noise: 0.0005, quantum: 0.0004 }, fault: dead@10 }
+//! seed: 0                     # optional: for the encoders' noise
 //! ```
 
 use std::path::{Path, PathBuf};
@@ -25,6 +28,7 @@ use serde::Deserialize;
 use crate::can::timing::Rates;
 use crate::damiao::{Limits, Model, REGISTER_ID};
 use crate::drivetrain::Transmission;
+use crate::effects::{EncoderSettings, Fault};
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -33,6 +37,9 @@ pub struct Robot {
     #[serde(default)]
     pub keyframe: Option<String>,
     pub buses: Vec<BusSpec>,
+    /// For the encoders' noise: each motor draws its own from it.
+    #[serde(default)]
+    pub seed: u64,
     /// The directory the file is in, which paths in it are relative to.
     #[serde(skip)]
     pub dir: PathBuf,
@@ -92,6 +99,13 @@ pub struct MotorSpec {
     /// Between the motor and its joint, when they don't turn together.
     #[serde(default)]
     pub transmission: Transmission,
+    /// What its encoder gets wrong: perfect by default.
+    #[serde(default)]
+    pub encoder: EncoderSettings,
+    /// How and when it breaks: `dead`, `weak`, `freeze`, `noisy`, `@`
+    /// seconds into the simulation.
+    #[serde(default)]
+    pub fault: Option<Fault>,
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize)]
@@ -125,6 +139,16 @@ impl Robot {
 
     pub fn scene_path(&self) -> PathBuf {
         self.dir.join(&self.scene)
+    }
+
+    /// Breaks the motor on `joint`: `--break joint:dead@10`.
+    pub fn break_motor(&mut self, arg: &str) -> Result<(), String> {
+        let (joint, fault) =
+            arg.rsplit_once(':').ok_or_else(|| format!("--break {arg}: joint:fault, as elbow:dead@10"))?;
+        let fault = Fault::parse(fault)?;
+        let motor = self.buses.iter_mut().flat_map(|b| &mut b.motors).find(|m| m.joint == joint);
+        motor.ok_or_else(|| format!("--break: no motor drives {joint}"))?.fault = Some(fault);
+        Ok(())
     }
 
     /// Every motor, with its bus.
@@ -183,6 +207,10 @@ fn check_bus(bus: &BusSpec) -> Result<(), String> {
         }
         if !m.transmission.ratio.is_finite() || m.transmission.ratio == 0.0 || !m.transmission.offset.is_finite() {
             return Err(format!("{}: a transmission's ratio isn't zero", m.joint));
+        }
+        let e = m.encoder;
+        if [e.delay_ms, e.bias, e.drift, e.noise, e.quantum].iter().any(|x| !(x.is_finite() && *x >= 0.0)) {
+            return Err(format!("{}: an encoder's settings are zero or more", m.joint));
         }
     }
     Ok(())

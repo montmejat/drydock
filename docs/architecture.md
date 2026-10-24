@@ -17,8 +17,8 @@ own software, unchanged.
 | | |
 |---|---|
 | **Real**: the same code as on the robot | the bus master and its driver library, its socket calls, its threads and timing on the host, its handling of every answer |
-| **Modelled**: real code paths, simulated input | each motor's firmware (answers, states, registers, timeout, MIT control law), its torque limit and transmission, the bus's timing (frame lengths, arbitration), the robot's mechanics (MuJoCo, from the robot's own MJCF) |
-| **Absent**: not exercised at all | the bus's electrical faults (error frames, bus-off), the motors' other modes, thermals, power, faults other than lost communication |
+| **Modelled**: real code paths, simulated input | each motor's firmware (answers, states, registers, timeout, MIT control law), its torque limit and transmission, its encoder's errors, its faults on a flag, the bus's timing (frame lengths, arbitration), the robot's mechanics (MuJoCo, from the robot's own MJCF) |
+| **Absent**: not exercised at all | the bus's electrical faults (error frames, bus-off), the motors' other modes, thermals, power |
 
 Most simulators draw the line higher: the robot's software talks to the
 simulator through an adapter of its own (a Python API, a TCP protocol), and
@@ -30,7 +30,7 @@ out.
 ```
  bus masters (wave, openarm_can, keel…), one per bus
         │  CAN frames on vcan0, vcan1…
- ┌──────▼────────────────────────────────────────────────────────────┐
+ ┌──────▼─────────────────────────────────────────────────────────────┐
  │ can/          frames, SocketCAN                                    │
  │ can/timing    how long each frame takes, which goes first          │
  │ run           the clock: real time or lockstep, over every bus     │
@@ -52,7 +52,8 @@ out.
 | `damiao::protocol` | Damiao's frames: commands, feedback, special frames, registers, packing, the motors' factory ranges | anything but bytes ↔ values |
 | `damiao::motor` | one motor's firmware: disabled, enabled or in error; its command; its registers; its timeout; the torque its law asks for | what limits that torque, joints, MuJoCo: it's handed `(t, θ, θ̇)` and the torque it got |
 | `damiao::bus` | the motors on one bus: whose a frame is, CAN FD or classic, notes on what's ignored | timing, physics |
-| `drivetrain` | what a motor can give (peak torque), and how its turning moves its joint (transmission) | protocols |
+| `drivetrain` | what a motor can give (peak torque), how its turning moves its joint (transmission), what it senses of it | protocols |
+| `effects` | an encoder's errors (delay, bias, drift, noise, counts), faults (dead, weak, frozen, noisy), a seeded generator | motors, protocols |
 | `world`, `shim/world.c` | MuJoCo: joints by name, their state, forces on them, stepping, keyframes, silencing the scene's own actuators | motors |
 | `dock` | the robot: each bus's motors, each motor's drivetrain and joint | sockets, clocks |
 | `robot` | the robot file | |
@@ -86,12 +87,13 @@ its CAN controller); what takes time is everything after it.
 
 ## 4. A step's way through
 
-1. For each motor: its angle and velocity, through its transmission.
+1. For each motor: its angle and velocity, through its transmission, then
+   its encoder (late, offset, noisy, counted, or frozen).
 2. The motor's law asks for a torque: `kp (p_des − θ) + kd (v_des − θ̇) +
    t_ff` on its latest command if it's enabled, none otherwise. A motor past
    its timeout goes to error `D` here.
-3. The actuator gives what it can (within the peak torque); the motor
-   records it, to report.
+3. The actuator gives what it can (within the peak torque, none if it's
+   dead, a fifth if it's weak); the motor records it, to report.
 4. Through the transmission, it's the force on the joint (MuJoCo's
    `qfrc_applied`).
 5. MuJoCo steps once, by the scene's timestep.
@@ -199,6 +201,14 @@ higher ids) goes. That is what a CAN controller with several transmit
 buffers does; one that sends a frame at a time, with gaps between, would let
 answers in between.
 
+**Faults are on a flag, and say nothing.** A motor breaks when the robot
+file or `--break` says, in simulated seconds, so a run that finds it
+repeats. A broken motor still reports itself enabled: a dead drive or a
+frozen encoder doesn't announce itself on a real robot either, and noticing
+is the bus master's job, or its health checks'. Run against keel with the
+elbow dying at 2 s, the elbow drops to its stop within a second, and nothing
+in the logs says so.
+
 **Lockstep has no timing.** It's for repeatable, faster-than-real-time runs;
 frames taking time would only add delays the master can't see in its
 stamps.
@@ -231,10 +241,6 @@ without a robot. The fourth: a bus too slow for its loop, found without
 one.
 
 ## 9. What's next
-
-**Hardware effects.** Encoder noise and quantization, command delay, and
-faults on a flag (a dead motor, a frozen encoder), seeded, so health checks
-have something to find. They belong in the drivetrain.
 
 **A second protocol.** Dynamixel 2.0 on a serial line, for Microduck: as in
 section 2.

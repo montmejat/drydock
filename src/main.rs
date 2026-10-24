@@ -8,10 +8,13 @@ use drydock::run::{self, Line};
 const USAGE: &str = "\
 drydock: a robot's motors on virtual CAN buses, simulated in MuJoCo
 
-usage: drydock <robot.yml> [--lockstep <hz>]
+usage: drydock <robot.yml> [--lockstep <hz>] [--break <joint>:<fault>]...
 
-  --lockstep <hz>    step 1/hz seconds of physics each time every motor has
-                     had a frame, instead of following the wall clock";
+  --lockstep <hz>          step 1/hz seconds of physics each time every motor
+                           has had a frame, instead of following the wall clock
+  --break <joint>:<fault>  break the motor on <joint>: dead, weak, freeze or
+                           noisy, now or @ seconds into the simulation
+                           (elbow:freeze@10)";
 
 fn main() -> ExitCode {
     match main_() {
@@ -25,7 +28,7 @@ fn main() -> ExitCode {
 
 fn main_() -> Result<(), String> {
     let mut args = std::env::args().skip(1);
-    let (mut path, mut lockstep) = (None, None);
+    let (mut path, mut lockstep, mut breaks) = (None, None, Vec::new());
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "-h" | "--help" => {
@@ -40,13 +43,17 @@ fn main_() -> Result<(), String> {
                 }
                 lockstep = Some(hz);
             }
+            "--break" => breaks.push(args.next().ok_or("--break needs joint:fault")?),
             _ if arg.starts_with('-') => return Err(format!("no option {arg}\n\n{USAGE}")),
             _ if path.is_none() => path = Some(arg),
             _ => return Err(format!("one robot file at a time\n\n{USAGE}")),
         }
     }
     let path = path.ok_or(USAGE)?;
-    let robot = Robot::load(&path)?;
+    let mut robot = Robot::load(&path)?;
+    for b in &breaks {
+        robot.break_motor(b)?;
+    }
     let dock = Drydock::load(&robot)?;
     if let Some(hz) = lockstep {
         run::steps_per_period(dock.timestep(), 1.0 / hz)?;
@@ -77,8 +84,18 @@ fn main_() -> Result<(), String> {
             false => format!("classic CAN, {} Mbit/s", bus.bitrate / 1e6),
         };
         eprintln!("  {} ({kind})", bus.can);
-        for (i, m) in dock.motors(b).iter().enumerate() {
-            eprintln!("    {:<22} {:#05x} -> {:#05x}  peak {} N m", m.joint, m.id, m.master_id, dock.peak_torque(b, i));
+        for (i, (m, spec)) in dock.motors(b).iter().zip(&bus.motors).enumerate() {
+            let fault = match spec.fault {
+                Some(f) => format!("  breaks: {:?} at {} s", f.what, f.after_s).to_lowercase(),
+                None => String::new(),
+            };
+            eprintln!(
+                "    {:<22} {:#05x} -> {:#05x}  peak {} N m{fault}",
+                m.joint,
+                m.id,
+                m.master_id,
+                dock.peak_torque(b, i)
+            );
         }
     }
     let result = match lockstep {

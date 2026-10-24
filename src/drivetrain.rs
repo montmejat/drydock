@@ -1,10 +1,12 @@
 //! Between a motor's firmware and its joint, the physical part: what limits
-//! the torque the motor gives (the actuator), and how the motor's turning
-//! moves its joint (the transmission). A motor asks for a torque; this says
-//! what reaches the joint, and what the motor senses of it.
+//! the torque the motor gives (the actuator), how the motor's turning moves
+//! its joint (the transmission), what its encoder reads of it, and how it
+//! breaks (`effects`). A motor asks for a torque; this says what reaches the
+//! joint, and what the motor senses of it.
 
 use serde::Deserialize;
 
+use crate::effects::{self, Encoder, Fault};
 use crate::world::Joint;
 
 /// What a motor can physically give.
@@ -50,12 +52,29 @@ impl Transmission {
     }
 }
 
-/// A motor's way to its joint.
-#[derive(Debug, Clone, Copy)]
+/// A motor's way to its joint, and back.
+#[derive(Debug, Clone)]
 pub struct Drivetrain {
     pub joint: Joint,
     pub actuator: Actuator,
     pub transmission: Transmission,
+    pub encoder: Encoder,
+    pub fault: Option<Fault>,
+}
+
+impl Drivetrain {
+    /// What the motor senses at `now`, its joint being at `q`, moving at
+    /// `v`: through the transmission, then its encoder.
+    pub fn sense(&mut self, now: f64, q: f64, v: f64) -> (f64, f64) {
+        let (theta, omega) = self.transmission.to_motor(q, v);
+        self.encoder.sense(now, theta, omega, Fault::at(self.fault, now))
+    }
+
+    /// The torque the motor gives at `now`, its firmware asking for `asked`:
+    /// within its peak, unless it has broken.
+    pub fn torque(&self, now: f64, asked: f64) -> f64 {
+        effects::torque(self.actuator.torque(asked), Fault::at(self.fault, now))
+    }
 }
 
 #[cfg(test)]
