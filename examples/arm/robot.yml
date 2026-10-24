@@ -2,8 +2,9 @@
 # its own: commands to 0x01, 0x02, answers on 0x11, 0x12.
 scene: arm.xml
 keyframe: home
-bus: vcan0
-motors:
-  - { joint: shoulder, model: DM4340, id: 0x01, master_id: 0x11 }
-  # The elbow lets go if 100 ms pass without a frame.
-  - { joint: elbow, model: DM4310, id: 0x02, master_id: 0x12, peak_torque: 7, timeout_ms: 100 }
+buses:
+  - can: vcan0
+    motors:
+      - { joint: shoulder, model: DM4340, id: 0x01, master_id: 0x11 }
+      # The elbow lets go if 100 ms pass without a frame.
+      - { joint: elbow, model: DM4310, id: 0x02, master_id: 0x12, peak_torque: 7, timeout_ms: 100 }

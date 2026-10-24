@@ -1,6 +1,8 @@
-//! One Damiao motor in MIT mode: what it does with the frames it gets, and
-//! the torque it puts on its joint. It knows nothing of MuJoCo: it is handed
-//! its joint's position and velocity, and the time.
+//! One Damiao motor in MIT mode, as its firmware behaves: what it does with
+//! the frames it gets, and the torque its control law asks for. It knows
+//! nothing of MuJoCo, nor of what limits the torque it gets
+//! (`drivetrain.rs`): it is handed its own angle and velocity, the time, and
+//! the torque it was given.
 
 use crate::can::Frame;
 use crate::damiao::{reg, status, Feedback, Limits, Mit, Register, RegisterReply, Special};
@@ -18,8 +20,6 @@ pub struct Motor {
     pub master_id: u16,
     /// PMAX, VMAX, TMAX: writable through registers.
     pub limits: Limits,
-    /// The most torque it gives, N m.
-    pub peak_torque: f64,
     /// Without a frame for this long, seconds, it disables itself with
     /// [`status::COMMUNICATION_LOST`].
     pub timeout: Option<f64>,
@@ -30,18 +30,17 @@ pub struct Motor {
     heard: f64,
     /// The joint's position that reads as zero.
     zero: f64,
-    /// The torque it gave on the last step.
+    /// The torque it got on the last step, which it reports.
     torque: f64,
 }
 
 impl Motor {
-    pub fn new(joint: String, id: u16, master_id: u16, limits: Limits, peak_torque: f64, timeout: Option<f64>) -> Self {
+    pub fn new(joint: String, id: u16, master_id: u16, limits: Limits, timeout: Option<f64>) -> Self {
         Self {
             joint,
             id,
             master_id,
             limits,
-            peak_torque,
             timeout,
             status: status::DISABLED,
             command: Mit::default(),
@@ -145,21 +144,24 @@ impl Motor {
         }
     }
 
-    /// The torque on its joint until the next step: the MIT law on its
-    /// command while enabled, within its peak torque; none otherwise.
-    pub fn step(&mut self, now: f64, q: f64, v: f64) -> f64 {
+    /// The torque it asks for until the next step: the MIT law on its
+    /// command while enabled, none otherwise. A motor past its timeout
+    /// disables itself here.
+    pub fn law(&mut self, now: f64, q: f64, v: f64) -> f64 {
         if self.status == status::ENABLED && self.timeout.is_some_and(|t| now - self.heard > t) {
             self.status = status::COMMUNICATION_LOST;
         }
-        self.torque = if self.status == status::ENABLED {
-            let c = self.command;
-            let p = q - self.zero;
-            let t = c.kp as f64 * (c.p as f64 - p) + c.kd as f64 * (c.v as f64 - v) + c.t as f64;
-            t.clamp(-self.peak_torque, self.peak_torque)
-        } else {
-            0.0
-        };
-        self.torque
+        if self.status != status::ENABLED {
+            return 0.0;
+        }
+        let c = self.command;
+        let p = q - self.zero;
+        c.kp as f64 * (c.p as f64 - p) + c.kd as f64 * (c.v as f64 - v) + c.t as f64
+    }
+
+    /// The torque it got, after what limits it: what it reports.
+    pub fn applied(&mut self, torque: f64) {
+        self.torque = torque;
     }
 
     fn feedback(&self, q: f64, v: f64) -> Frame {
@@ -182,7 +184,7 @@ mod tests {
     use crate::damiao::Model;
 
     fn motor() -> Motor {
-        Motor::new("j".into(), 1, 0x11, Model::DM4310.limits(), 7.0, Some(0.1))
+        Motor::new("j".into(), 1, 0x11, Model::DM4310.limits(), Some(0.1))
     }
 
     fn command(m: &Motor, c: Mit) -> [u8; 8] {
@@ -194,10 +196,10 @@ mod tests {
         let mut m = motor();
         let c = command(&m, Mit { p: 1.0, v: 0.0, kp: 2.0, kd: 0.5, t: 0.25 });
         m.on_frame(&c, 0.0, 0.0, 0.0);
-        assert_eq!(m.step(0.0, 0.0, 0.0), 0.0);
+        assert_eq!(m.law(0.0, 0.0, 0.0), 0.0);
         m.on_frame(&Special::Enable.encode(), 0.0, 0.0, 0.0);
         m.on_frame(&c, 0.0, 0.0, 0.0);
-        let t = m.step(0.0, 0.5, 1.0);
+        let t = m.law(0.0, 0.5, 1.0);
         // The law on the command as packed: kp has 12 bits over 0..500.
         let d = Mit::decode(&c, m.limits);
         let law = d.kp as f64 * (d.p as f64 - 0.5) + d.kd as f64 * (d.v as f64 - 1.0) + d.t as f64;
@@ -206,20 +208,21 @@ mod tests {
     }
 
     #[test]
-    fn torque_stays_within_its_peak() {
+    fn reports_the_torque_it_got() {
         let mut m = motor();
         m.on_frame(&Special::Enable.encode(), 0.0, 0.0, 0.0);
-        m.on_frame(&command(&m, Mit { p: 10.0, kp: 500.0, ..Default::default() }), 0.0, 0.0, 0.0);
-        assert_eq!(m.step(0.0, 0.0, 0.0), 7.0);
+        m.applied(-1.5);
+        let f = m.on_frame(&Special::Enable.encode(), 0.0, 0.0, 0.0);
+        assert!((Feedback::decode(&f.eight().unwrap(), m.limits).t + 1.5).abs() < 0.01);
     }
 
     #[test]
     fn lost_commands_disable_it_until_the_error_is_cleared() {
         let mut m = motor();
         m.on_frame(&Special::Enable.encode(), 0.0, 0.0, 0.0);
-        m.step(0.05, 0.0, 0.0);
+        m.law(0.05, 0.0, 0.0);
         assert_eq!(m.status(), status::ENABLED);
-        m.step(0.2, 0.0, 0.0);
+        m.law(0.2, 0.0, 0.0);
         assert_eq!(m.status(), status::COMMUNICATION_LOST);
         m.on_frame(&Special::Enable.encode(), 0.2, 0.0, 0.0);
         assert_eq!(m.status(), status::COMMUNICATION_LOST);

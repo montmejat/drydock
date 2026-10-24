@@ -1,3 +1,5 @@
 scene: slide.xml
-motors:
-  - { joint: slide, model: DM4310, id: 0x08, master_id: 0x18, transmission: { ratio: 0.042, offset: 0.044 } }
+buses:
+  - can: vcan0
+    motors:
+      - { joint: slide, model: DM4310, id: 0x08, master_id: 0x18, transmission: { ratio: 0.042, offset: 0.044 } }

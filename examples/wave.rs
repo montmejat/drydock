@@ -9,7 +9,7 @@ use std::error::Error;
 use std::f32::consts::TAU;
 use std::time::{Duration, Instant};
 
-use drydock::can::{Bus, Frame};
+use drydock::can::{Frame, Socket};
 use drydock::damiao::{Feedback, Mit, Special};
 use drydock::robot::Robot;
 
@@ -23,12 +23,14 @@ fn main() -> Result<(), Box<dyn Error>> {
         None => None,
     };
     let robot = Robot::load(path)?;
-    let bus = Bus::open(&robot.bus)?;
-    let motors = &robot.motors;
+    // The first bus's motors.
+    let line = &robot.buses[0];
+    let bus = Socket::open(&line.can)?;
+    let motors = &line.motors;
     let mut latest: Vec<Option<Feedback>> = vec![None; motors.len()];
 
     for m in motors {
-        bus.send(&Frame::new(m.id, Special::Enable.encode()))?;
+        bus.send(&Frame::new(m.id, Special::Enable.encode()).fd(line.fd))?;
     }
     let start = Instant::now();
     for cycle in 0u64.. {
@@ -40,7 +42,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             // Each joint at its own pace, within half a radian of level.
             let w = TAU * 0.25 * (i + 1) as f32;
             let c = Mit { p: 0.5 * (w * t).sin(), v: 0.5 * w * (w * t).cos(), kp: 40.0, kd: 1.0, t: 0.0 };
-            bus.send(&Frame::new(m.id, c.encode(m.limits())))?;
+            bus.send(&Frame::new(m.id, c.encode(m.limits())).fd(line.fd))?;
         }
         let due = start + PERIOD * (cycle as u32 + 1);
         while let Some(wait) = due.checked_duration_since(Instant::now()) {
@@ -62,7 +64,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
     }
     for m in motors {
-        bus.send(&Frame::new(m.id, Special::Disable.encode()))?;
+        bus.send(&Frame::new(m.id, Special::Disable.encode()).fd(line.fd))?;
     }
     Ok(())
 }

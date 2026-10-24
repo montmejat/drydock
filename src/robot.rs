@@ -1,23 +1,30 @@
-//! A robot file: the scene, the bus, and the motors on the bus. The scene
-//! (MJCF) says how the robot moves; this file says what drives it.
+//! A robot file: the scene, and the buses that drive it, each with its
+//! motors. The scene (MJCF) says how the robot moves; this file says what
+//! drives it.
 //!
 //! ```yaml
-//! scene: arm.xml          # relative to this file
-//! keyframe: home          # optional: where it starts
-//! bus: vcan0              # optional, vcan0 by default
-//! can_fd: false           # optional: whether the motors are on CAN FD
-//! motors:
-//!   - { joint: shoulder, model: DM4340, id: 0x01, master_id: 0x11 }
-//!   - { joint: elbow, model: DM4310, id: 0x02, master_id: 0x12, peak_torque: 7, timeout_ms: 100 }
-//!   # A gripper: the motor's angle moves a finger along a slide.
-//!   - { joint: finger, model: DM4310, id: 0x08, master_id: 0x18, transmission: { ratio: 0.042, offset: 0.044 } }
+//! scene: arm.xml              # relative to this file
+//! keyframe: home              # optional: where it starts
+//! buses:
+//!   - can: vcan0              # the interface
+//!     fd: false               # optional: whether the motors are on CAN FD
+//!     bitrate: 1000000        # optional: bit/s, 1 Mbit/s by default
+//!     data_bitrate: 5000000   # optional: CAN FD's data phase, 5 Mbit/s by default
+//!     reply_us: 0             # optional: how long a motor takes to answer
+//!     motors:
+//!       - { joint: shoulder, model: DM4340, id: 0x01, master_id: 0x11 }
+//!       - { joint: elbow, model: DM4310, id: 0x02, master_id: 0x12, peak_torque: 7, timeout_ms: 100 }
+//!       # A gripper: the motor's angle moves a finger along a slide.
+//!       - { joint: finger, model: DM4310, id: 0x08, master_id: 0x18, transmission: { ratio: 0.042, offset: 0.044 } }
 //! ```
 
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
+use crate::can::timing::Rates;
 use crate::damiao::{Limits, Model, REGISTER_ID};
+use crate::drivetrain::Transmission;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -25,15 +32,44 @@ pub struct Robot {
     pub scene: PathBuf,
     #[serde(default)]
     pub keyframe: Option<String>,
-    #[serde(default = "default_bus")]
-    pub bus: String,
-    /// Whether the motors are set to CAN FD. Classic CAN by default.
-    #[serde(default)]
-    pub can_fd: bool,
-    pub motors: Vec<MotorSpec>,
+    pub buses: Vec<BusSpec>,
     /// The directory the file is in, which paths in it are relative to.
     #[serde(skip)]
     pub dir: PathBuf,
+}
+
+/// A CAN bus of Damiao motors.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BusSpec {
+    /// The interface: `vcan0`.
+    pub can: String,
+    /// Whether the motors are set to CAN FD. Classic CAN by default.
+    #[serde(default)]
+    pub fd: bool,
+    #[serde(default = "default_bitrate")]
+    pub bitrate: f64,
+    #[serde(default = "default_data_bitrate")]
+    pub data_bitrate: f64,
+    /// How long a motor takes from a frame to its answer, µs. Unknown for
+    /// Damiao's motors: none by default.
+    #[serde(default)]
+    pub reply_us: f64,
+    pub motors: Vec<MotorSpec>,
+}
+
+impl BusSpec {
+    pub fn rates(&self) -> Rates {
+        Rates { nominal: self.bitrate, data: self.data_bitrate }
+    }
+}
+
+fn default_bitrate() -> f64 {
+    1e6
+}
+
+fn default_data_bitrate() -> f64 {
+    5e6
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -66,44 +102,15 @@ pub struct LimitsSpec {
     pub t: Option<f32>,
 }
 
-/// A linear transmission: the joint is at `offset + ratio θ` when the
-/// motor is at `θ` (rad), so a motor torque `τ` puts `τ / ratio` on the
-/// joint. A slide joint's ratio is in metres per radian.
-#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Transmission {
-    pub ratio: f64,
-    #[serde(default)]
-    pub offset: f64,
-}
-
-impl Default for Transmission {
-    fn default() -> Self {
-        Self { ratio: 1.0, offset: 0.0 }
-    }
-}
-
-impl Transmission {
-    /// The motor's angle and velocity, from its joint's.
-    pub fn to_motor(&self, q: f64, v: f64) -> (f64, f64) {
-        ((q - self.offset) / self.ratio, v / self.ratio)
-    }
-
-    /// The force or torque on the joint, from the motor's torque.
-    pub fn to_joint(&self, torque: f64) -> f64 {
-        torque / self.ratio
-    }
-}
-
 impl MotorSpec {
     pub fn limits(&self) -> Limits {
         let l = self.model.limits();
         Limits { p: self.limits.p.unwrap_or(l.p), v: self.limits.v.unwrap_or(l.v), t: self.limits.t.unwrap_or(l.t) }
     }
-}
 
-fn default_bus() -> String {
-    "vcan0".into()
+    pub fn peak_torque(&self) -> f64 {
+        self.peak_torque.unwrap_or(self.limits().t as f64)
+    }
 }
 
 impl Robot {
@@ -120,32 +127,63 @@ impl Robot {
         self.dir.join(&self.scene)
     }
 
-    /// Ids must be 11-bit, apart from each other and from `0x7FF`.
+    /// Every motor, with its bus.
+    pub fn motors(&self) -> impl Iterator<Item = (&BusSpec, &MotorSpec)> {
+        self.buses.iter().flat_map(|b| b.motors.iter().map(move |m| (b, m)))
+    }
+
     fn check(&self) -> Result<(), String> {
-        if self.motors.is_empty() {
-            return Err("no motors".into());
+        if self.buses.is_empty() {
+            return Err("no buses".into());
         }
-        let mut ids: Vec<(u16, &str)> = Vec::new();
-        for m in &self.motors {
-            for (id, what) in [(m.id, "id"), (m.master_id, "master_id")] {
-                if id >= REGISTER_ID {
-                    return Err(format!("{}'s {what} {id:#x} isn't below 0x7FF", m.joint));
-                }
-                if let Some((_, other)) = ids.iter().find(|(i, _)| *i == id) {
-                    return Err(format!("{}'s {what} {id:#x} is also {other}'s", m.joint));
-                }
-                ids.push((id, &m.joint));
+        let mut interfaces = Vec::new();
+        for bus in &self.buses {
+            if interfaces.contains(&&bus.can) {
+                return Err(format!("{} is listed twice", bus.can));
             }
-            if [m.peak_torque, m.timeout_ms].into_iter().flatten().any(|x| x.is_nan() || x <= 0.0) {
-                return Err(format!("{}: peak_torque and timeout_ms are above zero", m.joint));
-            }
-            if [m.limits.p, m.limits.v, m.limits.t].into_iter().flatten().any(|x| x.is_nan() || x <= 0.0) {
-                return Err(format!("{}: limits are above zero", m.joint));
-            }
-            if !m.transmission.ratio.is_finite() || m.transmission.ratio == 0.0 || !m.transmission.offset.is_finite() {
-                return Err(format!("{}: a transmission's ratio isn't zero", m.joint));
-            }
+            interfaces.push(&bus.can);
+            check_bus(bus).map_err(|e| format!("{}: {e}", bus.can))?;
+        }
+        let mut joints: Vec<&str> = self.motors().map(|(_, m)| m.joint.as_str()).collect();
+        joints.sort();
+        if let Some(w) = joints.windows(2).find(|w| w[0] == w[1]) {
+            return Err(format!("two motors drive {}", w[0]));
         }
         Ok(())
     }
+}
+
+/// Ids must be 11-bit, apart from each other and from `0x7FF` (on one bus:
+/// two buses may use the same ids, as two arms do).
+fn check_bus(bus: &BusSpec) -> Result<(), String> {
+    if bus.motors.is_empty() {
+        return Err("no motors".into());
+    }
+    if [bus.bitrate, bus.data_bitrate].iter().any(|r| !(r.is_finite() && *r > 0.0))
+        || !(bus.reply_us.is_finite() && bus.reply_us >= 0.0)
+    {
+        return Err("bit rates are above zero, reply_us zero or more".into());
+    }
+    let mut ids: Vec<(u16, &str)> = Vec::new();
+    for m in &bus.motors {
+        for (id, what) in [(m.id, "id"), (m.master_id, "master_id")] {
+            if id >= REGISTER_ID {
+                return Err(format!("{}'s {what} {id:#x} isn't below 0x7FF", m.joint));
+            }
+            if let Some((_, other)) = ids.iter().find(|(i, _)| *i == id) {
+                return Err(format!("{}'s {what} {id:#x} is also {other}'s", m.joint));
+            }
+            ids.push((id, &m.joint));
+        }
+        if [m.peak_torque, m.timeout_ms].into_iter().flatten().any(|x| x.is_nan() || x <= 0.0) {
+            return Err(format!("{}: peak_torque and timeout_ms are above zero", m.joint));
+        }
+        if [m.limits.p, m.limits.v, m.limits.t].into_iter().flatten().any(|x| x.is_nan() || x <= 0.0) {
+            return Err(format!("{}: limits are above zero", m.joint));
+        }
+        if !m.transmission.ratio.is_finite() || m.transmission.ratio == 0.0 || !m.transmission.offset.is_finite() {
+            return Err(format!("{}: a transmission's ratio isn't zero", m.joint));
+        }
+    }
+    Ok(())
 }

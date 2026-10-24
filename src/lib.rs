@@ -1,10 +1,20 @@
-//! drydock: a robot's motors on a virtual CAN bus, their physics simulated in
-//! MuJoCo. A bus master talks to it as it would to the real motors.
+//! drydock: a robot's motors on virtual CAN buses, their physics simulated
+//! in MuJoCo. A bus master talks to it as it would to the real motors.
+//!
+//! The pieces, from the bus to the world:
+//!
+//! - `can`: frames, sockets, and how long frames take on a real bus;
+//! - `run`: the clock, real time or lockstep, over every bus;
+//! - `damiao`: Damiao's protocol, one motor's firmware, the motors on a bus;
+//! - `drivetrain`: what limits a motor's torque, and how it moves its joint;
+//! - `world`: MuJoCo;
+//! - `dock`: the robot, putting them together;
+//! - `robot`: the robot file.
 
 pub mod can;
 pub mod damiao;
 pub mod dock;
-pub mod motor;
+pub mod drivetrain;
 pub mod robot;
 pub mod run;
 pub mod world;

@@ -1,9 +1,11 @@
-//! A CAN bus through the kernel's SocketCAN: a raw socket on an interface
-//! (`vcan0`, or a real `can0`), exchanging classic and CAN FD frames.
+//! CAN: frames, a SocketCAN socket to carry them (`vcan0`, or a real
+//! `can0`), and how long they take on a real bus (`timing`).
 //!
 //! CAN FD frames carry up to 64 bytes, and switch to a faster bit rate for
 //! their data (BRS); classic frames carry up to 8. Damiao's motors use 8
 //! either way.
+
+pub mod timing;
 
 use std::ffi::CString;
 use std::io;
@@ -59,13 +61,14 @@ const NOT_DATA_FRAME: u32 = 0x8000_0000 | 0x4000_0000 | 0x2000_0000;
 const SOL_CAN_RAW: libc::c_int = libc::SOL_CAN_BASE + libc::CAN_RAW;
 const CAN_RAW_FD_FRAMES: libc::c_int = 5;
 
-pub struct Bus {
+/// A raw CAN socket on one interface.
+pub struct Socket {
     socket: OwnedFd,
     /// Whether the interface carries CAN FD frames (its MTU is 72).
     fd_capable: bool,
 }
 
-impl Bus {
+impl Socket {
     pub fn open(interface: &str) -> io::Result<Self> {
         let name = CString::new(interface)?;
         // SAFETY: plain syscalls on a socket we own, with arguments that
@@ -125,38 +128,61 @@ impl Bus {
         Ok(())
     }
 
-    /// The next frame, waiting at most `timeout` (`None`: as long as it
-    /// takes). `None` when nothing came, or when what came isn't a data
-    /// frame with an 11-bit id, or the wait was interrupted: callers look at
-    /// the clock and ask again.
-    pub fn recv(&self, timeout: Option<Duration>) -> io::Result<Option<Frame>> {
-        let mut fds = libc::pollfd { fd: self.socket.as_raw_fd(), events: libc::POLLIN, revents: 0 };
-        let ts = timeout.map(|t| libc::timespec { tv_sec: t.as_secs() as _, tv_nsec: t.subsec_nanos() as _ });
-        let ts_ptr = ts.as_ref().map_or(std::ptr::null(), |t| t as *const libc::timespec);
-        // SAFETY: one pollfd and an optional timespec, both live through the call.
-        let ready = unsafe { libc::ppoll(&mut fds, 1, ts_ptr, std::ptr::null()) };
-        if ready < 0 {
-            let e = io::Error::last_os_error();
-            return if e.kind() == io::ErrorKind::Interrupted { Ok(None) } else { Err(e) };
+    /// The next frame if one is waiting, without waiting for one. What
+    /// isn't a data frame with an 11-bit id is passed over.
+    pub fn try_recv(&self) -> io::Result<Option<Frame>> {
+        loop {
+            let mut raw = RawFrame { id: 0, len: 0, flags: 0, _reserved: [0; 2], data: [0; 64] };
+            // SAFETY: reads at most `CANFD_MTU` bytes into a live `RawFrame`.
+            let n =
+                unsafe { libc::recv(self.socket.as_raw_fd(), (&raw mut raw).cast(), CANFD_MTU, libc::MSG_DONTWAIT) };
+            if n < 0 {
+                let e = io::Error::last_os_error();
+                return match e.kind() {
+                    io::ErrorKind::WouldBlock => Ok(None),
+                    io::ErrorKind::Interrupted => continue,
+                    _ => Err(e),
+                };
+            }
+            let fd = match n as usize {
+                CAN_MTU => false,
+                CANFD_MTU => true,
+                _ => continue,
+            };
+            if raw.id & NOT_DATA_FRAME != 0 {
+                continue;
+            }
+            let len = raw.len.min(if fd { 64 } else { 8 });
+            return Ok(Some(Frame { id: raw.id as u16, len, data: raw.data, fd }));
         }
-        if ready == 0 {
-            return Ok(None);
-        }
-        let mut raw = RawFrame { id: 0, len: 0, flags: 0, _reserved: [0; 2], data: [0; 64] };
-        // SAFETY: reads at most `CANFD_MTU` bytes into a live `RawFrame`.
-        let n = unsafe { libc::read(self.socket.as_raw_fd(), (&raw mut raw).cast(), CANFD_MTU) };
-        if n < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        let fd = match n as usize {
-            CAN_MTU => false,
-            CANFD_MTU => true,
-            _ => return Ok(None),
-        };
-        if raw.id & NOT_DATA_FRAME != 0 {
-            return Ok(None);
-        }
-        let len = raw.len.min(if fd { 64 } else { 8 });
-        Ok(Some(Frame { id: raw.id as u16, len, data: raw.data, fd }))
     }
+
+    /// The next frame, waiting at most `timeout` (`None`: as long as it
+    /// takes). `None` if none came in time.
+    pub fn recv(&self, timeout: Option<Duration>) -> io::Result<Option<Frame>> {
+        if wait_any(&[self], timeout)?.first() == Some(&true) {
+            return self.try_recv();
+        }
+        Ok(None)
+    }
+}
+
+/// Waits at most `timeout` (`None`: as long as it takes) for any of
+/// `sockets` to have a frame, and says which do. An interrupted wait ends
+/// early, with none.
+pub fn wait_any(sockets: &[&Socket], timeout: Option<Duration>) -> io::Result<Vec<bool>> {
+    let mut fds: Vec<libc::pollfd> =
+        sockets.iter().map(|s| libc::pollfd { fd: s.socket.as_raw_fd(), events: libc::POLLIN, revents: 0 }).collect();
+    let ts = timeout.map(|t| libc::timespec { tv_sec: t.as_secs() as _, tv_nsec: t.subsec_nanos() as _ });
+    let ts_ptr = ts.as_ref().map_or(std::ptr::null(), |t| t as *const libc::timespec);
+    // SAFETY: `fds` and the optional timespec live through the call.
+    let ready = unsafe { libc::ppoll(fds.as_mut_ptr(), fds.len() as _, ts_ptr, std::ptr::null()) };
+    if ready < 0 {
+        let e = io::Error::last_os_error();
+        if e.kind() != io::ErrorKind::Interrupted {
+            return Err(e);
+        }
+        return Ok(vec![false; sockets.len()]);
+    }
+    Ok(fds.iter().map(|f| f.revents & libc::POLLIN != 0).collect())
 }

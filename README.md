@@ -65,24 +65,37 @@ step go through them, the decisions behind them and what's left to do.
 
 A robot is two files. The **scene** (MJCF) says how it moves: links, masses,
 joints, rotor inertia (`armature`), damping, friction. The **robot file**
-says what drives it:
+says what drives it: one or more CAN buses (two arms are often two buses),
+each with its motors.
 
 ```yaml
-scene: arm.xml          # relative to this file
-keyframe: home          # optional: where it starts
-bus: vcan0              # optional, vcan0 by default
-can_fd: false           # optional: whether the motors are on CAN FD
-motors:
-  - { joint: shoulder, model: DM4340, id: 0x01, master_id: 0x11 }
-  - { joint: elbow, model: DM4310, id: 0x02, master_id: 0x12, peak_torque: 7, timeout_ms: 100 }
-  - { joint: finger, model: DM4310, id: 0x08, master_id: 0x18, transmission: { ratio: 0.042, offset: 0.044 } }
+scene: arm.xml              # relative to this file
+keyframe: home              # optional: where it starts
+buses:
+  - can: vcan0              # the interface
+    fd: false               # optional: whether the motors are on CAN FD
+    bitrate: 1000000        # optional: 1 Mbit/s by default
+    data_bitrate: 5000000   # optional: CAN FD's data phase, 5 Mbit/s by default
+    reply_us: 0             # optional: how long a motor takes to answer
+    motors:
+      - { joint: shoulder, model: DM4340, id: 0x01, master_id: 0x11 }
+      - { joint: elbow, model: DM4310, id: 0x02, master_id: 0x12, peak_torque: 7, timeout_ms: 100 }
+      - { joint: finger, model: DM4310, id: 0x08, master_id: 0x18, transmission: { ratio: 0.042, offset: 0.044 } }
 ```
 
-- `can_fd`: the motors answer in CAN FD (8 bytes, data at the faster bit
-  rate), and understand both kinds, as CAN FD controllers do. Motors on
-  classic CAN ignore CAN FD frames, with a note: on a real bus they'd answer
-  with error frames. The interface must carry CAN FD (`scripts/vcan.sh`
-  makes it so).
+A bus:
+
+- `fd`: the motors answer in CAN FD (8 bytes, data at the faster bit rate),
+  and understand both kinds, as CAN FD controllers do. Motors on classic
+  CAN ignore CAN FD frames, with a note: on a real bus they'd answer with
+  error frames. The interface must carry CAN FD (`scripts/vcan.sh` makes it
+  so).
+- `bitrate`, `data_bitrate`: how fast frames cross the bus (see Time).
+- `reply_us`: from a frame reaching a motor to its answer being ready to
+  go. Unknown for Damiao's motors, so none by default.
+
+A motor:
+
 - `joint`: a hinge or slide joint in the scene. If the scene has its own
   actuators on it (MuJoCo Menagerie's models do), they're silenced: the
   motor drives the joint now.
@@ -121,22 +134,30 @@ Not yet, or not at all:
   timeout is set in the robot file instead.
 - **Temperatures** are always 25 °C. Nothing overheats, and no fault but
   communication loss happens on its own.
-- **Bus timing.** Answers go out at once; a real bus spaces them by their
-  length at its bit rate.
 
 ## Time
 
 **In real time** (the default), a physics step runs each timestep of the
-wall clock (the scene's `<option timestep>`), and frames are answered as they
-come, with the state of the moment. If the simulation falls more than
-100 ms behind, it says so and carries on from the present.
+wall clock (the scene's `<option timestep>`), and frames take as long as
+they would on the real bus: each one's bits, stuffing included, at the bus's
+bit rates, one frame at a time, the lowest id first when several wait (so a
+master's commands go before the motors' answers). A frame reaches its motor
+when it's across, and the answer, with the state of that moment, crosses in
+turn. A bus kept busy says so, once a second:
+
+```
+drydock: vcan0: busy 96% of the last 1.0 s; frames waited up to 0.85 ms for it
+```
+
+(OpenArm on classic CAN at 500 Hz: it just fits.) If the simulation falls
+more than 100 ms behind, it says so and carries on from the present.
 
 **In lockstep** (`--lockstep <hz>`), time follows the bus master. Each frame
 is answered at once, and once every motor has had a frame, `1/hz` seconds of
 physics run. A master that sends each motor a command per cycle reads, in
 the answers, what its previous commands did, a cycle later, as on a real bus.
 Unlike a real bus, every run is the same, frame for frame, and runs as fast
-as the master goes. Time stands still while the master is silent, so
+as the master goes; frames take no time. Time stands still while the master is silent, so
 timeouts never fire in lockstep unless a motor is left out of cycles that
 the others complete.
 
@@ -144,13 +165,13 @@ the others complete.
 
 | | |
 |---|---|
-| `src/damiao.rs` | the protocol: frames, packing, the motors' factory ranges |
-| `src/motor.rs` | one motor: its state, its answers, its torque |
+| `src/can/` | frames and SocketCAN; `timing.rs`, how long frames take and in what order |
+| `src/run.rs` | the clock: real time or lockstep, over every bus |
+| `src/damiao/` | `protocol.rs`, the frames; `motor.rs`, one motor's firmware; `bus.rs`, the motors on one bus |
+| `src/drivetrain.rs` | what limits a motor's torque, and how it moves its joint |
 | `src/world.rs`, `shim/world.c` | MuJoCo, through a small C shim, so Rust mirrors none of its structs |
-| `src/dock.rs` | a robot: frames in, frames out, steps of physics |
-| `src/run.rs` | real time and lockstep |
-| `src/can.rs` | SocketCAN |
-| `src/robot.rs` | the robot file, and transmissions |
+| `src/dock.rs` | the robot: buses of motors on the world's joints |
+| `src/robot.rs` | the robot file |
 | `examples/arm` | a two-joint arm; `examples/wave.rs`, a bus master for it |
 | `examples/openarm` | OpenArm v1; `hold.cpp`, a bus master on `openarm_can` |
 

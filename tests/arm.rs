@@ -15,14 +15,14 @@ fn arm() -> (Drydock, Robot) {
 }
 
 fn feedback(robot: &Robot, frame: Frame) -> Feedback {
-    let m = robot.motors.iter().find(|m| m.master_id == frame.id).expect("an answer on a master id");
+    let (_, m) = robot.motors().find(|(_, m)| m.master_id == frame.id).expect("an answer on a master id");
     Feedback::decode(&frame.eight().unwrap(), m.limits())
 }
 
 /// A master's cycle: a frame to each motor, then `seconds` of physics once
 /// all have had theirs, as `--lockstep` runs it.
 fn cycle(dock: &mut Drydock, frames: &[(u16, [u8; 8])], seconds: f64) -> Vec<Frame> {
-    let answers = frames.iter().filter_map(|&(id, data)| dock.handle(&Frame::new(id, data))).collect();
+    let answers = frames.iter().filter_map(|&(id, data)| dock.deliver(0, &Frame::new(id, data))).collect();
     assert!(dock.cycle_done(), "every motor had a frame");
     for _ in 0..steps_per_period(dock.timestep(), seconds).unwrap() {
         dock.step();
@@ -31,11 +31,11 @@ fn cycle(dock: &mut Drydock, frames: &[(u16, [u8; 8])], seconds: f64) -> Vec<Fra
 }
 
 fn hold(robot: &Robot, p: f32) -> Vec<(u16, [u8; 8])> {
-    robot.motors.iter().map(|m| (m.id, Mit { p, v: 0.0, kp: 60.0, kd: 2.0, t: 0.0 }.encode(m.limits()))).collect()
+    robot.motors().map(|(_, m)| (m.id, Mit { p, v: 0.0, kp: 60.0, kd: 2.0, t: 0.0 }.encode(m.limits()))).collect()
 }
 
 fn enable(robot: &Robot) -> Vec<(u16, [u8; 8])> {
-    robot.motors.iter().map(|m| (m.id, Special::Enable.encode())).collect()
+    robot.motors().map(|(_, m)| (m.id, Special::Enable.encode())).collect()
 }
 
 #[test]
@@ -59,7 +59,7 @@ fn holds_a_position_against_gravity() {
 #[test]
 fn a_disabled_arm_falls() {
     let (mut dock, robot) = arm();
-    let refresh: Vec<_> = robot.motors.iter().map(|m| (0x7FF, Register::Refresh { motor: m.id }.encode())).collect();
+    let refresh: Vec<_> = robot.motors().map(|(_, m)| (0x7FF, Register::Refresh { motor: m.id }.encode())).collect();
     let mut answers = Vec::new();
     for _ in 0..500 {
         answers = cycle(&mut dock, &refresh, 0.001);
@@ -93,12 +93,13 @@ fn a_motor_left_without_frames_lets_go() {
 #[test]
 fn registers_answer_on_the_master_id() {
     let (mut dock, _) = arm();
-    let reply = dock.handle(&Frame::new(0x7FF, Register::Read { motor: ELBOW, rid: reg::MST_ID }.encode())).unwrap();
+    let reply =
+        dock.deliver(0, &Frame::new(0x7FF, Register::Read { motor: ELBOW, rid: reg::MST_ID }.encode())).unwrap();
     assert_eq!(reply.id, 0x12);
     let reply = RegisterReply::decode(&reply.eight().unwrap()).unwrap();
     assert_eq!((reply.motor, reply.value), (ELBOW, 0x12u32.to_le_bytes()));
     // Someone else's motor: no answer.
-    assert!(dock.handle(&Frame::new(0x7FF, Register::Read { motor: 0x05, rid: reg::PMAX }.encode())).is_none());
+    assert!(dock.deliver(0, &Frame::new(0x7FF, Register::Read { motor: 0x05, rid: reg::PMAX }.encode())).is_none());
 }
 
 #[test]
@@ -119,19 +120,19 @@ fn lockstep_runs_are_the_same() {
 fn a_classic_robot_ignores_can_fd_frames() {
     let (mut dock, _) = arm();
     let enable = Frame::new(SHOULDER, Special::Enable.encode());
-    assert!(dock.handle(&enable.fd(true)).is_none());
-    let answer = dock.handle(&enable).unwrap();
+    assert!(dock.deliver(0, &enable.fd(true)).is_none());
+    let answer = dock.deliver(0, &enable).unwrap();
     assert!(!answer.fd);
 }
 
 #[test]
 fn a_robot_on_can_fd_answers_in_it_and_understands_classic_frames() {
     let mut robot = Robot::load(concat!(env!("CARGO_MANIFEST_DIR"), "/examples/arm/robot.yml")).unwrap();
-    robot.can_fd = true;
+    robot.buses[0].fd = true;
     let mut dock = Drydock::load(&robot).unwrap();
     let enable = Frame::new(SHOULDER, Special::Enable.encode());
     for frame in [enable.fd(true), enable] {
-        let answer = dock.handle(&frame).unwrap();
+        let answer = dock.deliver(0, &frame).unwrap();
         assert!(answer.fd);
         assert_eq!(feedback(&robot, answer).status, status::ENABLED);
     }
