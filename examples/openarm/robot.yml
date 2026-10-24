@@ -1,0 +1,27 @@
+# OpenArm v1, one arm and its gripper, wired as OpenArm's ROS 2 driver
+# (openarm_ros2) expects by default: commands to 0x01-0x08, answers on
+# 0x11-0x18, on CAN FD as OpenArm's are by default. The model is OpenArm's
+# own (examples/openarm/setup.sh fetches it).
+scene: openarm_mujoco/v1/openarm.xml
+keyframe: home
+bus: vcan0
+can_fd: true
+motors:
+  - { joint: openarm_joint1, model: DM8009, id: 0x01, master_id: 0x11 }
+  - { joint: openarm_joint2, model: DM8009, id: 0x02, master_id: 0x12 }
+  # OpenArm's driver packs a DM4340's velocity into ±10 rad/s, where
+  # Damiao's reference driver says 8: VMAX is a register, and this is what
+  # OpenArm's motors are set to.
+  - { joint: openarm_joint3, model: DM4340, id: 0x03, master_id: 0x13, limits: { v: 10 } }
+  - { joint: openarm_joint4, model: DM4340, id: 0x04, master_id: 0x14, limits: { v: 10 } }
+  - { joint: openarm_joint5, model: DM4310, id: 0x05, master_id: 0x15 }
+  - { joint: openarm_joint6, model: DM4310, id: 0x06, master_id: 0x16 }
+  - { joint: openarm_joint7, model: DM4310, id: 0x07, master_id: 0x17 }
+  # The gripper: OpenArm's driver takes the motor at 0 rad as the fingers
+  # 44 mm open and at -1.0472 rad as closed, linearly. The second finger
+  # follows the first through the model's own equality constraint.
+  - joint: openarm_finger_joint1
+    model: DM4310
+    id: 0x08
+    master_id: 0x18
+    transmission: { ratio: 0.042017, offset: 0.044 }

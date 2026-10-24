@@ -74,6 +74,7 @@ pub struct Limits {
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 pub enum Model {
+    DM3507,
     DM4310,
     DM4310_48V,
     DM4340,
@@ -89,9 +90,13 @@ pub enum Model {
 }
 
 impl Model {
-    /// The ranges a motor leaves the factory with (`Limit_Param`).
+    /// The ranges a motor leaves the factory with (`Limit_Param` in Damiao's
+    /// reference driver). A robot's motors may be set otherwise: the robot
+    /// file can say so.
     pub fn limits(self) -> Limits {
         let (p, v, t) = match self {
+            // Not in Damiao's table; from OpenArm's driver (openarm_can).
+            Model::DM3507 => (12.5, 50.0, 5.0),
             Model::DM4310 => (12.5, 30.0, 10.0),
             Model::DM4310_48V => (12.5, 50.0, 10.0),
             Model::DM4340 => (12.5, 8.0, 28.0),

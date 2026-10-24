@@ -1,0 +1,11 @@
+<!-- A kilogram on a vertical slide, driven through a transmission as
+     OpenArm's gripper finger is. -->
+<mujoco model="slide">
+  <option timestep="0.0005" integrator="implicitfast"/>
+  <worldbody>
+    <body name="carriage" pos="0 0 0.5">
+      <joint name="slide" type="slide" axis="0 0 1" range="-0.1 0.1" damping="1"/>
+      <geom type="box" size="0.02 0.02 0.02" mass="1" contype="0" conaffinity="0"/>
+    </body>
+  </worldbody>
+</mujoco>

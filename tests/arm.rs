@@ -16,7 +16,7 @@ fn arm() -> (Drydock, Robot) {
 
 fn feedback(robot: &Robot, frame: Frame) -> Feedback {
     let m = robot.motors.iter().find(|m| m.master_id == frame.id).expect("an answer on a master id");
-    Feedback::decode(&frame.data, m.model.limits())
+    Feedback::decode(&frame.eight().unwrap(), m.limits())
 }
 
 /// A master's cycle: a frame to each motor, then `seconds` of physics once
@@ -31,7 +31,7 @@ fn cycle(dock: &mut Drydock, frames: &[(u16, [u8; 8])], seconds: f64) -> Vec<Fra
 }
 
 fn hold(robot: &Robot, p: f32) -> Vec<(u16, [u8; 8])> {
-    robot.motors.iter().map(|m| (m.id, Mit { p, v: 0.0, kp: 60.0, kd: 2.0, t: 0.0 }.encode(m.model.limits()))).collect()
+    robot.motors.iter().map(|m| (m.id, Mit { p, v: 0.0, kp: 60.0, kd: 2.0, t: 0.0 }.encode(m.limits()))).collect()
 }
 
 fn enable(robot: &Robot) -> Vec<(u16, [u8; 8])> {
@@ -95,7 +95,7 @@ fn registers_answer_on_the_master_id() {
     let (mut dock, _) = arm();
     let reply = dock.handle(&Frame::new(0x7FF, Register::Read { motor: ELBOW, rid: reg::MST_ID }.encode())).unwrap();
     assert_eq!(reply.id, 0x12);
-    let reply = RegisterReply::decode(&reply.data).unwrap();
+    let reply = RegisterReply::decode(&reply.eight().unwrap()).unwrap();
     assert_eq!((reply.motor, reply.value), (ELBOW, 0x12u32.to_le_bytes()));
     // Someone else's motor: no answer.
     assert!(dock.handle(&Frame::new(0x7FF, Register::Read { motor: 0x05, rid: reg::PMAX }.encode())).is_none());
@@ -113,4 +113,26 @@ fn lockstep_runs_are_the_same() {
         all
     };
     assert_eq!(run(), run());
+}
+
+#[test]
+fn a_classic_robot_ignores_can_fd_frames() {
+    let (mut dock, _) = arm();
+    let enable = Frame::new(SHOULDER, Special::Enable.encode());
+    assert!(dock.handle(&enable.fd(true)).is_none());
+    let answer = dock.handle(&enable).unwrap();
+    assert!(!answer.fd);
+}
+
+#[test]
+fn a_robot_on_can_fd_answers_in_it_and_understands_classic_frames() {
+    let mut robot = Robot::load(concat!(env!("CARGO_MANIFEST_DIR"), "/examples/arm/robot.yml")).unwrap();
+    robot.can_fd = true;
+    let mut dock = Drydock::load(&robot).unwrap();
+    let enable = Frame::new(SHOULDER, Special::Enable.encode());
+    for frame in [enable.fd(true), enable] {
+        let answer = dock.handle(&frame).unwrap();
+        assert!(answer.fd);
+        assert_eq!(feedback(&robot, answer).status, status::ENABLED);
+    }
 }

@@ -40,13 +40,14 @@ fn main() -> Result<(), Box<dyn Error>> {
             // Each joint at its own pace, within half a radian of level.
             let w = TAU * 0.25 * (i + 1) as f32;
             let c = Mit { p: 0.5 * (w * t).sin(), v: 0.5 * w * (w * t).cos(), kp: 40.0, kd: 1.0, t: 0.0 };
-            bus.send(&Frame::new(m.id, c.encode(m.model.limits())))?;
+            bus.send(&Frame::new(m.id, c.encode(m.limits())))?;
         }
         let due = start + PERIOD * (cycle as u32 + 1);
         while let Some(wait) = due.checked_duration_since(Instant::now()) {
             let Some(frame) = bus.recv(Some(wait))? else { continue };
-            if let Some(i) = motors.iter().position(|m| m.master_id == frame.id) {
-                latest[i] = Some(Feedback::decode(&frame.data, motors[i].model.limits()));
+            let i = motors.iter().position(|m| m.master_id == frame.id);
+            if let (Some(i), Some(data)) = (i, frame.eight()) {
+                latest[i] = Some(Feedback::decode(&data, motors[i].limits()));
             }
         }
         if cycle % 250 == 0 {

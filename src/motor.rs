@@ -234,7 +234,7 @@ mod tests {
         let mut m = motor();
         m.on_frame(&Special::Zero.encode(), 0.0, 1.5, 0.0);
         let f = m.on_frame(&Special::Enable.encode(), 0.0, 1.75, 0.0);
-        assert!((Feedback::decode(&f.data, m.limits).p - 0.25).abs() < 1e-3);
+        assert!((Feedback::decode(&f.eight().unwrap(), m.limits).p - 0.25).abs() < 1e-3);
     }
 
     #[test]
@@ -243,11 +243,11 @@ mod tests {
         let read = |m: &mut Motor, rid| m.on_register(Register::Read { motor: 1, rid }, 0.0, 0.0, 0.0);
         let f = read(&mut m, reg::PMAX).unwrap();
         assert_eq!(f.id, 0x11);
-        assert_eq!(RegisterReply::decode(&f.data).unwrap().value, 12.5f32.to_le_bytes());
+        assert_eq!(RegisterReply::decode(&f.eight().unwrap()).unwrap().value, 12.5f32.to_le_bytes());
         assert!(read(&mut m, reg::TIMEOUT).is_none());
 
         let write = Register::Write { motor: 1, rid: reg::CTRL_MODE, value: 2u32.to_le_bytes() };
-        let reply = RegisterReply::decode(&m.on_register(write, 0.0, 0.0, 0.0).unwrap().data).unwrap();
+        let reply = RegisterReply::decode(&m.on_register(write, 0.0, 0.0, 0.0).unwrap().eight().unwrap()).unwrap();
         assert!(reply.write);
         assert_eq!(reply.value, reg::MIT_MODE.to_le_bytes());
 

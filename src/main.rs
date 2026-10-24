@@ -60,11 +60,18 @@ fn main_() -> Result<(), String> {
         )
     })?;
 
+    if dock.can_fd() && !bus.fd_capable() {
+        return Err(format!(
+            "the motors are on CAN FD, but `{interface}` carries classic frames only\n\
+             (`sudo scripts/vcan.sh {interface}` makes it carry both)"
+        ));
+    }
     let pace = match lockstep {
         Some(hz) => format!("in lockstep at {hz} Hz"),
         None => "in real time".into(),
     };
-    eprintln!("drydock: {} on {interface}, {pace}, {} ms steps", robot.scene.display(), dock.timestep() * 1e3);
+    let kind = if dock.can_fd() { "CAN FD" } else { "classic CAN" };
+    eprintln!("drydock: {} on {interface} ({kind}), {pace}, {} ms steps", robot.scene.display(), dock.timestep() * 1e3);
     for m in dock.motors() {
         eprintln!("  {:<12} {:#05x} -> {:#05x}  peak {} N m", m.joint, m.id, m.master_id, m.peak_torque);
     }
