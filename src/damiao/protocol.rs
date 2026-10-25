@@ -14,6 +14,11 @@
 //!   status and id, then position, velocity, torque and two temperatures.
 //! - **Registers** are read and written through id `0x7FF`, and answered on
 //!   the master id.
+//! - **Other modes** than MIT, chosen with the `CTRL_MODE` register, take
+//!   their commands at `id + 0x100` (position-velocity), `id + 0x200`
+//!   (velocity, four bytes) and `id + 0x300` (position-force), as plain
+//!   numbers rather than packed ones (openarm_can's encoder, and Damiao's
+//!   documentation it cites).
 //!
 //! Positions, velocities and torques are packed into the ranges set by the
 //! motor's PMAX, VMAX and TMAX registers; a value outside its range is
@@ -59,9 +64,35 @@ pub mod reg {
     pub fn is_integer(rid: u8) -> bool {
         matches!(rid, 7..=10 | 13..=16 | 35..=36)
     }
+}
 
-    /// CTRL_MODE's value for MIT mode.
-    pub const MIT_MODE: u32 = 1;
+/// The control modes, as `CTRL_MODE` numbers them, and where their commands
+/// go, past the motor's id.
+pub mod mode {
+    pub const MIT: u32 = 1;
+    pub const POS_VEL: u32 = 2;
+    pub const VEL: u32 = 3;
+    pub const POS_FORCE: u32 = 4;
+
+    /// The mode a frame to `motor id + offset` is for.
+    pub fn of_offset(offset: u16) -> Option<u32> {
+        match offset {
+            0x100 => Some(POS_VEL),
+            0x200 => Some(VEL),
+            0x300 => Some(POS_FORCE),
+            _ => None,
+        }
+    }
+
+    pub fn name(mode: u32) -> &'static str {
+        match mode {
+            MIT => "MIT",
+            POS_VEL => "position-velocity",
+            VEL => "velocity",
+            POS_FORCE => "position-force",
+            _ => "unknown",
+        }
+    }
 }
 
 /// The ranges a motor packs position (rad), velocity (rad/s) and torque
@@ -168,6 +199,74 @@ impl Mit {
             kd: to_float(kd, 0.0, KD_MAX, 12),
             t: to_float(t, -l.t, l.t, 12),
         }
+    }
+}
+
+/// A position-velocity command, to `id + 0x100`: go to `p` (rad), no faster
+/// than `v` (rad/s). Two little-endian floats.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct PosVel {
+    pub p: f32,
+    pub v: f32,
+}
+
+impl PosVel {
+    pub fn encode(&self) -> [u8; 8] {
+        let ([a, b, c, d], [e, f, g, h]) = (self.p.to_le_bytes(), self.v.to_le_bytes());
+        [a, b, c, d, e, f, g, h]
+    }
+
+    pub fn decode(d: &[u8]) -> Option<Self> {
+        Some(PosVel {
+            p: f32::from_le_bytes(d.get(..4)?.try_into().ok()?),
+            v: f32::from_le_bytes(d.get(4..8)?.try_into().ok()?),
+        })
+    }
+}
+
+/// A velocity command, to `id + 0x200`: turn at `v` (rad/s). One
+/// little-endian float: four bytes.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Vel {
+    pub v: f32,
+}
+
+impl Vel {
+    pub fn encode(&self) -> [u8; 4] {
+        self.v.to_le_bytes()
+    }
+
+    pub fn decode(d: &[u8]) -> Option<Self> {
+        Some(Vel { v: f32::from_le_bytes(d.get(..4)?.try_into().ok()?) })
+    }
+}
+
+/// A position-force command, to `id + 0x300`: go to `p` (rad), no faster
+/// than `v` (rad/s, in hundredths, to 100), pushing with at most `i` of the
+/// motor's maximum current (in ten-thousandths, to 1).
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct PosForce {
+    pub p: f32,
+    pub v: f32,
+    pub i: f32,
+}
+
+impl PosForce {
+    pub fn encode(&self) -> [u8; 8] {
+        let [a, b, c, d] = self.p.to_le_bytes();
+        let [e, f] = ((self.v * 100.0).clamp(0.0, 10000.0) as u16).to_le_bytes();
+        let [g, h] = ((self.i * 10000.0).clamp(0.0, 10000.0) as u16).to_le_bytes();
+        [a, b, c, d, e, f, g, h]
+    }
+
+    pub fn decode(d: &[u8]) -> Option<Self> {
+        if d.len() != 8 {
+            return None;
+        }
+        let p = f32::from_le_bytes(d[..4].try_into().ok()?);
+        let v = u16::from_le_bytes([d[4], d[5]]).min(10000) as f32 / 100.0;
+        let i = u16::from_le_bytes([d[6], d[7]]).min(10000) as f32 / 10000.0;
+        Some(PosForce { p, v, i })
     }
 }
 

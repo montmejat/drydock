@@ -1,15 +1,43 @@
-//! One Damiao motor in MIT mode, as its firmware behaves: what it does with
-//! the frames it gets, and the torque its control law asks for. It knows
+//! One Damiao motor, as its firmware behaves: what it does with the frames
+//! it gets, and the torque its control law asks for, in MIT mode or one of
+//! its other modes (position-velocity, velocity, position-force). It knows
 //! nothing of MuJoCo, nor of what limits the torque it gets
 //! (`drivetrain.rs`): it is handed its own angle and velocity, the time, the
 //! torque it was given, and how hot it is (`thermal.rs`).
 
 use crate::can::Frame;
-use crate::damiao::{reg, status, Feedback, Limits, Mit, Register, RegisterReply, Special};
+use crate::damiao::{
+    mode, reg, status, Feedback, Limits, Mit, PosForce, PosVel, Register, RegisterReply, Special, Vel,
+};
 
 /// The over-temperature threshold a motor starts with, °C. Damiao doesn't
 /// say what theirs leave the factory with; assumed.
 pub const OVER_TEMPERATURE: f32 = 120.0;
+
+/// The motor's own loops in its other modes: a speed loop, and a position
+/// loop around it. Damiao sets their gains with registers (`KP_ASR`,
+/// `KI_ASR`, `KP_APR`) but doesn't publish their defaults, so these are
+/// assumed, and chosen to match the MIT gains OpenArm's driver gives its
+/// motors (kd about TMAX / 20, kp about 20 kd).
+///
+/// The speed loop's gain: torque per rad/s of error, as a share of TMAX.
+const SPEED_GAIN: f64 = 1.0 / 20.0;
+/// How fast its integral catches up, per second: what holds a load.
+const SPEED_INTEGRAL: f64 = 10.0;
+/// The position loop's: rad/s asked per rad of error.
+const POSITION_GAIN: f64 = 20.0;
+
+/// The command in force, in the mode it was given in.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+enum Command {
+    /// Enabled, or switched modes, and told nothing since: no torque.
+    #[default]
+    None,
+    Mit(Mit),
+    PosVel(PosVel),
+    Vel(Vel),
+    PosForce(PosForce),
+}
 
 #[derive(Debug, Clone)]
 pub struct Motor {
@@ -25,8 +53,13 @@ pub struct Motor {
     /// [`status::COMMUNICATION_LOST`].
     pub timeout: Option<f64>,
     status: u8,
+    /// CTRL_MODE: which commands it takes.
+    mode: u32,
     /// The command in force while enabled.
-    command: Mit,
+    command: Command,
+    /// The speed loop's integral, N m, and when the law last ran.
+    integral: f64,
+    last_law: Option<f64>,
     /// When it last got a frame.
     heard: f64,
     /// The joint's position that reads as zero.
@@ -49,7 +82,10 @@ impl Motor {
             limits,
             timeout,
             status: status::DISABLED,
-            command: Mit::default(),
+            mode: mode::MIT,
+            command: Command::None,
+            integral: 0.0,
+            last_law: None,
             heard: 0.0,
             zero: 0.0,
             torque: 0.0,
@@ -67,19 +103,25 @@ impl Motor {
         self.torque
     }
 
-    /// A frame to its id: a command, or one of the special frames. Answered
-    /// with feedback, as a real motor answers each.
+    /// The mode it's in.
+    pub fn mode(&self) -> u32 {
+        self.mode
+    }
+
+    /// A frame to its id: one of the special frames, in any mode, or an MIT
+    /// command, in MIT mode. Answered with feedback, as a real motor answers
+    /// each; an MIT command in another mode is ignored, unanswered.
     ///
     /// A command counts only while enabled; enabling starts from no command
-    /// (zero gains, zero torque) until the next one. A motor in error stays
-    /// in it, enabled or not, until the error is cleared.
-    pub fn on_frame(&mut self, data: &[u8; 8], now: f64, q: f64, v: f64) -> Frame {
+    /// (no torque) until the next one. A motor in error stays in it, enabled
+    /// or not, until the error is cleared.
+    pub fn on_frame(&mut self, data: &[u8; 8], now: f64, q: f64, v: f64) -> Option<Frame> {
         self.heard = now;
         match Special::decode(data) {
             Some(Special::Enable) => {
                 if self.status == status::DISABLED {
                     self.status = status::ENABLED;
-                    self.command = Mit::default();
+                    self.reset();
                 }
             }
             Some(Special::Disable) => {
@@ -93,16 +135,45 @@ impl Motor {
                     self.status = status::DISABLED;
                 }
             }
+            None if self.mode != mode::MIT => return None,
             None => {
                 if self.status == status::ENABLED {
-                    self.command = Mit::decode(data, self.limits);
+                    self.command = Command::Mit(Mit::decode(data, self.limits));
                 }
             }
         }
         if self.status != status::ENABLED {
             self.torque = 0.0;
         }
-        self.feedback(q, v)
+        Some(self.feedback(q, v))
+    }
+
+    /// A command in another mode than MIT, to `id + 0x100`, `+ 0x200` or
+    /// `+ 0x300`: taken while enabled in that mode, and answered with
+    /// feedback. In another mode, or malformed, it's ignored, unanswered.
+    pub fn on_mode_frame(&mut self, mode: u32, data: &[u8], now: f64, q: f64, v: f64) -> Option<Frame> {
+        if mode != self.mode {
+            return None;
+        }
+        let command = match mode {
+            mode::POS_VEL => Command::PosVel(PosVel::decode(data)?),
+            mode::VEL => Command::Vel(Vel::decode(data)?),
+            mode::POS_FORCE => Command::PosForce(PosForce::decode(data)?),
+            _ => return None,
+        };
+        self.heard = now;
+        if self.status == status::ENABLED {
+            self.command = command;
+        } else {
+            self.torque = 0.0;
+        }
+        Some(self.feedback(q, v))
+    }
+
+    /// No command, and the speed loop starting afresh.
+    fn reset(&mut self) {
+        self.command = Command::None;
+        self.integral = 0.0;
     }
 
     /// A register request for this motor. Reads and writes are answered
@@ -130,7 +201,7 @@ impl Motor {
             reg::OT_VALUE => self.over_temperature.to_le_bytes(),
             reg::MST_ID => (self.master_id as u32).to_le_bytes(),
             reg::ESC_ID => (self.id as u32).to_le_bytes(),
-            reg::CTRL_MODE => reg::MIT_MODE.to_le_bytes(),
+            reg::CTRL_MODE => self.mode.to_le_bytes(),
             reg::PMAX => self.limits.p.to_le_bytes(),
             reg::VMAX => self.limits.v.to_le_bytes(),
             reg::TMAX => self.limits.t.to_le_bytes(),
@@ -138,10 +209,18 @@ impl Motor {
         })
     }
 
-    /// The ranges, and the over-temperature threshold within 80 to 200 °C,
-    /// are writable. The ids aren't, since the bus would have to change
-    /// under drydock; nor is the mode, since only MIT mode is simulated.
+    /// The ranges, the over-temperature threshold within 80 to 200 °C, and
+    /// the mode (1 to 4) are writable. A new mode starts from no command.
+    /// The ids aren't, since the bus would have to change under drydock.
     fn write(&mut self, rid: u8, value: [u8; 4]) {
+        if rid == reg::CTRL_MODE {
+            let m = u32::from_le_bytes(value);
+            if (mode::MIT..=mode::POS_FORCE).contains(&m) && m != self.mode {
+                self.mode = m;
+                self.reset();
+            }
+            return;
+        }
         let x = f32::from_le_bytes(value);
         if !(x.is_finite() && x > 0.0) {
             return;
@@ -155,19 +234,41 @@ impl Motor {
         }
     }
 
-    /// The torque it asks for until the next step: the MIT law on its
-    /// command while enabled, none otherwise. A motor past its timeout
-    /// disables itself here.
+    /// The torque it asks for until the next step, while enabled: the MIT
+    /// law on an MIT command; in the other modes, its own speed loop, and a
+    /// position loop around it for position-velocity and position-force.
+    /// None otherwise. A motor past its timeout disables itself here.
     pub fn law(&mut self, now: f64, q: f64, v: f64) -> f64 {
+        let dt = self.last_law.map_or(0.0, |t| (now - t).max(0.0));
+        self.last_law = Some(now);
         if self.status == status::ENABLED && self.timeout.is_some_and(|t| now - self.heard > t) {
             self.status = status::COMMUNICATION_LOST;
         }
         if self.status != status::ENABLED {
             return 0.0;
         }
-        let c = self.command;
         let p = q - self.zero;
-        c.kp as f64 * (c.p as f64 - p) + c.kd as f64 * (c.v as f64 - v) + c.t as f64
+        let tmax = self.limits.t as f64;
+        let toward = |target: f32, speed: f32| {
+            (POSITION_GAIN * (target as f64 - p)).clamp(-speed.abs() as f64, speed.abs() as f64)
+        };
+        match self.command {
+            Command::None => 0.0,
+            Command::Mit(c) => c.kp as f64 * (c.p as f64 - p) + c.kd as f64 * (c.v as f64 - v) + c.t as f64,
+            Command::Vel(c) => self.speed(c.v as f64, v, dt, tmax),
+            Command::PosVel(c) => self.speed(toward(c.p, c.v), v, dt, tmax),
+            // The current's share of its maximum, taken as the torque's of TMAX.
+            Command::PosForce(c) => self.speed(toward(c.p, c.v), v, dt, c.i as f64 * tmax),
+        }
+    }
+
+    /// The speed loop: the torque that turns it at `wanted` (rad/s), turning
+    /// at `v`, at most `limit` (N m) either way.
+    fn speed(&mut self, wanted: f64, v: f64, dt: f64, limit: f64) -> f64 {
+        let gain = SPEED_GAIN * self.limits.t as f64;
+        let error = wanted - v;
+        self.integral = (self.integral + SPEED_INTEGRAL * gain * error * dt).clamp(-limit, limit);
+        (gain * error + self.integral).clamp(-limit, limit)
     }
 
     /// The torque it got, after what limits it: what it reports.
@@ -240,7 +341,7 @@ mod tests {
         let mut m = motor();
         m.on_frame(&Special::Enable.encode(), 0.0, 0.0, 0.0);
         m.applied(-1.5);
-        let f = m.on_frame(&Special::Enable.encode(), 0.0, 0.0, 0.0);
+        let f = m.on_frame(&Special::Enable.encode(), 0.0, 0.0, 0.0).unwrap();
         assert!((Feedback::decode(&f.eight().unwrap(), m.limits).t + 1.5).abs() < 0.01);
     }
 
@@ -256,7 +357,7 @@ mod tests {
         assert_eq!(m.status(), status::COMMUNICATION_LOST);
         m.on_frame(&Special::ClearError.encode(), 0.2, 0.0, 0.0);
         assert_eq!(m.status(), status::DISABLED);
-        let f = m.on_frame(&Special::Enable.encode(), 0.2, 0.0, 0.0);
+        let f = m.on_frame(&Special::Enable.encode(), 0.2, 0.0, 0.0).unwrap();
         assert_eq!(f.data[0] >> 4, status::ENABLED);
     }
 
@@ -264,7 +365,7 @@ mod tests {
     fn zero_moves_where_positions_count_from() {
         let mut m = motor();
         m.on_frame(&Special::Zero.encode(), 0.0, 1.5, 0.0);
-        let f = m.on_frame(&Special::Enable.encode(), 0.0, 1.75, 0.0);
+        let f = m.on_frame(&Special::Enable.encode(), 0.0, 1.75, 0.0).unwrap();
         assert!((Feedback::decode(&f.eight().unwrap(), m.limits).p - 0.25).abs() < 1e-3);
     }
 
@@ -277,10 +378,15 @@ mod tests {
         assert_eq!(RegisterReply::decode(&f.eight().unwrap()).unwrap().value, 12.5f32.to_le_bytes());
         assert!(read(&mut m, reg::TIMEOUT).is_none());
 
-        let write = Register::Write { motor: 1, rid: reg::CTRL_MODE, value: 2u32.to_le_bytes() };
-        let reply = RegisterReply::decode(&m.on_register(write, 0.0, 0.0, 0.0).unwrap().eight().unwrap()).unwrap();
+        let write = |m: &mut Motor, mode: u32| {
+            let w = Register::Write { motor: 1, rid: reg::CTRL_MODE, value: mode.to_le_bytes() };
+            RegisterReply::decode(&m.on_register(w, 0.0, 0.0, 0.0).unwrap().eight().unwrap()).unwrap()
+        };
+        let reply = write(&mut m, mode::VEL);
         assert!(reply.write);
-        assert_eq!(reply.value, reg::MIT_MODE.to_le_bytes());
+        assert_eq!(reply.value, mode::VEL.to_le_bytes());
+        // No fifth mode: refused, and the answer says which it kept.
+        assert_eq!(write(&mut m, 5).value, mode::VEL.to_le_bytes());
 
         let write = Register::Write { motor: 1, rid: reg::TMAX, value: 20.0f32.to_le_bytes() };
         m.on_register(write, 0.0, 0.0, 0.0);

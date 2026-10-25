@@ -30,6 +30,18 @@ impl Frame {
         Self { id, len: 8, data: all, fd: false }
     }
 
+    /// A classic frame of fewer than 8 bytes, as a velocity command's four.
+    pub fn short(id: u16, data: &[u8]) -> Self {
+        let mut all = [0; 64];
+        all[..data.len()].copy_from_slice(data);
+        Self { id, len: data.len() as u8, data: all, fd: false }
+    }
+
+    /// Its data.
+    pub fn bytes(&self) -> &[u8] {
+        &self.data[..self.len as usize]
+    }
+
     /// The same frame, as CAN FD or classic.
     pub fn fd(self, fd: bool) -> Self {
         Self { fd, ..self }
