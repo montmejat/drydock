@@ -1,0 +1,10 @@
+# The supply browns out to 12 V for 2 s: the motors, enabled, stop with
+# undervoltage. Then it's cut for half a second: the motors go silent, and
+# come back disabled, from what they last saved.
+faults:
+  - supply: 12 V
+    at: 8 s
+    lasts: 2 s
+  - supply: off
+    at: 15 s
+    lasts: 500 ms

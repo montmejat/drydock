@@ -9,7 +9,8 @@
 //! FD controllers do. Motors on classic CAN don't understand CAN FD (on a
 //! real bus, they'd answer with error frames): it's ignored, with a note.
 //! A motor set to another bit rate than the bus's (`CAN_BR`) neither hears
-//! nor answers: on a real bus, it would only see errors.
+//! nor answers: on a real bus, it would only see errors. Nor does a motor
+//! without the voltage to run.
 
 use std::collections::HashSet;
 
@@ -80,7 +81,7 @@ impl Motors {
             return None;
         }
         let i = self.addressee(frame)?;
-        if self.motors[i].registers().bit_rate != self.bit_rate {
+        if !self.motors[i].on() || self.motors[i].registers().bit_rate != self.bit_rate {
             return None;
         }
         let answer = if frame.id == REGISTER_ID {
