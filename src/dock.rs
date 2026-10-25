@@ -1,13 +1,17 @@
-//! A simulated robot: the world, its buses of motors, each motor on its
-//! joint through its drivetrain, and the supply they run on. Frames that
-//! reached the motors in, answers out, and steps of physics. When frames reach the motors, and how time
-//! passes, is up to the caller (`run.rs`).
+//! A simulated robot: the world, its buses of motors (Damiao's on CAN,
+//! Dynamixel servos on serial lines), each motor on its joint through its
+//! drivetrain, and the supply they run on. Frames and packets that reached
+//! the motors in, answers out, and steps of physics. When they reach the
+//! motors, and how time passes, is up to the caller (`run.rs`).
 
 use crate::can::Frame;
 use crate::damiao::bus::Motors;
 use crate::damiao::motor::{Motor, Registers};
 use crate::damiao::{bit_rate, status};
 use crate::drivetrain::{Actuator, Drivetrain};
+use crate::dynamixel::bus::{Reply, Servos};
+use crate::dynamixel::xl330::Xl330;
+use crate::dynamixel::Packet;
 use crate::effects::{Breakdown, Encoder, Rng};
 use crate::power::{self, Supply};
 use crate::robot::Robot;
@@ -18,6 +22,7 @@ use crate::world::World;
 pub struct Drydock {
     world: World,
     buses: Vec<Bus>,
+    serial: Vec<SerialBus>,
     scenario: Option<Scenario>,
     /// What the scenario did, not yet asked for.
     happened: Vec<Happening>,
@@ -38,6 +43,17 @@ struct Bus {
     /// Which motors have had a frame since the last cycle ended.
     heard: Vec<bool>,
 }
+
+/// One serial bus's servos, and theirs.
+struct SerialBus {
+    servos: Servos,
+    drivetrains: Vec<Drivetrain>,
+    /// Which servos have had a packet since the last cycle ended.
+    heard: Vec<bool>,
+}
+
+/// One frame in ten, or one packet, on a lossy link.
+const LOSS: f64 = 0.1;
 
 impl Drydock {
     pub fn load(robot: &Robot) -> Result<Self, String> {
@@ -73,13 +89,47 @@ impl Drydock {
             let heard = vec![false; motors.len()];
             buses.push(Bus { motors: Motors::new(motors, spec.fd, rate), drivetrains, heard });
         }
+        let mut serial = Vec::new();
+        for (b, spec) in robot.serial.iter().enumerate() {
+            let (mut servos, mut drivetrains) = (Vec::new(), Vec::new());
+            let baud = spec.baud_code().expect("checked with the robot file");
+            for (i, m) in spec.motors.iter().enumerate() {
+                let joint = world.joint(&m.joint)?;
+                if world.release_actuators(joint) > 0 {
+                    eprintln!("drydock: the scene's actuator(s) on `{}` are off: its servo drives it", m.joint);
+                }
+                servos.push(Xl330::new(m.joint.clone(), m.id, baud));
+                let seed = robot.seed ^ ((((robot.buses.len() + b) as u64) << 32) | (i as u64 + 1));
+                drivetrains.push(Drivetrain {
+                    joint,
+                    // What limits a servo's torque is its own firmware and motor (BAM).
+                    actuator: Actuator { peak_torque: f64::INFINITY },
+                    transmission: m.transmission,
+                    encoder: Encoder::new(m.encoder, seed),
+                    thermal: Thermal::new(f64::INFINITY),
+                    faults: Vec::new(),
+                });
+            }
+            let heard = vec![false; servos.len()];
+            serial.push(SerialBus { servos: Servos::new(servos, baud), drivetrains, heard });
+        }
         let links = Rng::new(robot.seed ^ 0x6c696e6b);
         let supply = match robot.power {
-            Some(spec) => Supply::bench(spec, robot.motors().count()),
+            Some(spec) => Supply::new(spec, robot.joints().len()),
             None => Supply::ideal(),
         };
         let volts = supply.set;
-        Ok(Self { world, buses, scenario: None, happened: Vec::new(), links, supply, volts, supply_faults: Vec::new() })
+        Ok(Self {
+            world,
+            buses,
+            serial,
+            scenario: None,
+            happened: Vec::new(),
+            links,
+            supply,
+            volts,
+            supply_faults: Vec::new(),
+        })
     }
 
     /// What happens to the robot as time passes.
@@ -92,35 +142,46 @@ impl Drydock {
         std::mem::take(&mut self.happened)
     }
 
-    /// The motors' joints, counted across buses as a scenario counts them.
+    /// The motors' joints, counted across buses as a scenario counts them:
+    /// CAN buses first, then serial ones.
     pub fn joint_name(&self, motor: usize) -> &str {
-        let (b, i) = self.locate(motor);
-        &self.buses[b].motors.motors()[i].joint
+        match self.locate(motor) {
+            Place::Can(b, i) => &self.buses[b].motors.motors()[i].joint,
+            Place::Serial(b, i) => &self.serial[b].servos.servos()[i].joint,
+        }
     }
 
-    fn locate(&self, mut motor: usize) -> (usize, usize) {
+    fn locate(&self, mut motor: usize) -> Place {
         for (b, bus) in self.buses.iter().enumerate() {
             if motor < bus.drivetrains.len() {
-                return (b, motor);
+                return Place::Can(b, motor);
+            }
+            motor -= bus.drivetrains.len();
+        }
+        for (b, bus) in self.serial.iter().enumerate() {
+            if motor < bus.drivetrains.len() {
+                return Place::Serial(b, motor);
             }
             motor -= bus.drivetrains.len();
         }
         panic!("no motor {motor}")
     }
 
+    fn drivetrains_mut(&mut self) -> impl Iterator<Item = &mut Drivetrain> {
+        let can = self.buses.iter_mut().flat_map(|b| b.drivetrains.iter_mut());
+        can.chain(self.serial.iter_mut().flat_map(|b| b.drivetrains.iter_mut()))
+    }
+
     /// The scenario's faults that start or end by `now`.
     fn faults(&mut self, now: f64) {
-        let count = self.buses.iter().map(|b| b.drivetrains.len()).sum();
-        let mut motor = 0;
-        for b in &mut self.buses {
-            for d in &mut b.drivetrains {
-                for breakdown in d.recover(now) {
-                    let fault = Fault::Motor { motor, breakdown };
-                    self.happened.push(Happening { at: now, fault, what: Change::Recovers });
-                }
-                motor += 1;
+        let mut recovered = Vec::new();
+        for (motor, d) in self.drivetrains_mut().enumerate() {
+            for breakdown in d.recover(now) {
+                recovered.push(Happening { at: now, fault: Fault::Motor { motor, breakdown }, what: Change::Recovers });
             }
         }
+        let count = self.drivetrains_mut().count();
+        self.happened.extend(recovered);
         let (over, on): (Vec<_>, Vec<_>) =
             self.supply_faults.drain(..).partition(|&(_, until)| until.is_some_and(|u| u <= now));
         self.supply_faults = on;
@@ -132,8 +193,11 @@ impl Drydock {
             if let Change::Breaks { until } = h.what {
                 match h.fault {
                     Fault::Motor { motor, breakdown } => {
-                        let (b, i) = self.locate(motor);
-                        self.buses[b].drivetrains[i].faults.push((breakdown, until));
+                        let d = match self.locate(motor) {
+                            Place::Can(b, i) => &mut self.buses[b].drivetrains[i],
+                            Place::Serial(b, i) => &mut self.serial[b].drivetrains[i],
+                        };
+                        d.faults.push((breakdown, until));
                     }
                     Fault::Supply { volts } => self.supply_faults.push((volts, until)),
                 }
@@ -173,8 +237,6 @@ impl Drydock {
     /// lossy link loses about one frame in ten, each way. Either way the
     /// frame was on the bus, so a lockstep cycle counts it.
     pub fn deliver(&mut self, bus: usize, frame: &Frame) -> Option<Frame> {
-        /// One frame in ten, on a lossy link.
-        const LOSS: f64 = 0.1;
         let now = self.world.time();
         let (world, b, links) = (&self.world, &mut self.buses[bus], &mut self.links);
         if let Some(i) = b.motors.addressee(frame) {
@@ -196,6 +258,25 @@ impl Drydock {
             return None;
         }
         delivery.answer
+    }
+
+    /// An instruction packet reached the servos on serial bus `bus`: their
+    /// answers, each with how long after the packet it's ready.
+    ///
+    /// As on CAN, a servo whose link is down neither hears nor answers, and
+    /// a lossy link loses about one packet in ten, each way.
+    pub fn deliver_packet(&mut self, bus: usize, packet: &Packet) -> Vec<Reply> {
+        let (b, links) = (&mut self.serial[bus], &mut self.links);
+        let drivetrains = &b.drivetrains;
+        let heard = &mut b.heard;
+        let mut link = |i: usize| {
+            heard[i] = true;
+            let d = &drivetrains[i];
+            !(d.has(Breakdown::Disconnected) || (d.has(Breakdown::Lossy) && links.unit() < LOSS))
+        };
+        let mut answers = b.servos.deliver(packet, &mut link);
+        answers.retain(|a| a.from.is_none_or(|i| !b.drivetrains[i].has(Breakdown::Lossy) || links.unit() >= LOSS));
+        answers
     }
 
     /// One step of physics, under the torques the motors give now, and
@@ -228,6 +309,21 @@ impl Drydock {
                 self.world.set_force(d.joint, d.transmission.to_joint(torque));
             }
         }
+        for b in &mut self.serial {
+            for (i, d) in b.drivetrains.iter_mut().enumerate() {
+                let (q, v) = self.world.state(d.joint);
+                let (theta, omega) = d.sense(now, q, v);
+                let ratio = d.transmission.ratio;
+                // The load at the joint, at the horn: a joint torque τ is τ × ratio there.
+                let load = self.world.load_torque(d.joint) * ratio;
+                let out = b.servos.servo_mut(i).step(now, theta, omega, volts, load);
+                let torque = d.torque(out.torque);
+                self.world.set_force(d.joint, d.transmission.to_joint(torque));
+                self.world.set_friction(d.joint, out.frictionloss / ratio.abs(), out.damping / (ratio * ratio));
+                // What the H-bridge takes from the supply: the duty cycle's share of the motor's current.
+                watts += volts * out.duty * out.current;
+            }
+        }
         self.supply.step(dt, watts);
         self.world.step();
     }
@@ -235,12 +331,23 @@ impl Drydock {
     /// Whether every motor, on every bus, has had a frame since this last
     /// said yes: a cycle of the bus masters, in lockstep.
     pub fn cycle_done(&mut self) -> bool {
-        if self.buses.iter().all(|b| b.heard.iter().all(|&h| h)) {
-            for b in &mut self.buses {
-                b.heard.fill(false);
-            }
+        let all = |heard: &[bool]| heard.iter().all(|&h| h);
+        if self.buses.iter().all(|b| all(&b.heard)) && self.serial.iter().all(|b| all(&b.heard)) {
+            self.buses.iter_mut().for_each(|b| b.heard.fill(false));
+            self.serial.iter_mut().for_each(|b| b.heard.fill(false));
             return true;
         }
         false
     }
+
+    /// Serial bus `bus`'s servos, in the robot file's order.
+    pub fn servos(&self, bus: usize) -> &[Xl330] {
+        self.serial[bus].servos.servos()
+    }
+}
+
+/// Where a motor is: its bus and its place on it.
+enum Place {
+    Can(usize, usize),
+    Serial(usize, usize),
 }

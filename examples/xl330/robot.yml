@@ -1,0 +1,9 @@
+# One XL330 on a serial bus, as a bus master finds it: id 1, at 1 Mbit/s,
+# on 5 V, the servo's recommended supply. drydock links the bus at `port`.
+scene: bench.xml
+keyframe: down
+serial:
+  - port: /tmp/drydock-xl330
+    motors:
+      - { joint: horn, model: XL330-M288, id: 1 }
+power: { volts: 5.0, battery: true }

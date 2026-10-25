@@ -49,26 +49,30 @@ jobs:
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
 
-      - name: What drydock supports of Damiao's protocol
+      - name: What drydock supports of each protocol
         run: |
-          cargo test --test damiao -- --test-threads=1 2>/dev/null | awk '
-            /^test .* \.\.\. / {
-              name = $2; gsub("_", " ", name)
-              result = substr($0, index($0, "... ") + 4)
-              if (result == "ok") s = "yes"
-              else if (result ~ /^ignored, /) { sub(/^ignored, /, "", result); s = result }
-              else s = "**failing**"
-              print "| " name " | " s " |"
-            }' > rows.md
-          {
-            echo "## Damiao's protocol in drydock"
-            echo
-            echo "From \`tests/damiao.rs\`: supported means a test shows it."
-            echo
-            echo "| Feature | Simulated |"
-            echo "|---|---|"
-            cat rows.md
-          } >> "$GITHUB_STEP_SUMMARY"
+          for protocol in "damiao:Damiao's protocol" "dynamixel:Dynamixel's Protocol 2.0 and the XL330"; do
+            file=${protocol%%:*} title=${protocol#*:}
+            cargo test --test $file -- --test-threads=1 2>/dev/null | awk '
+              /^test .* \.\.\. / {
+                name = $2; gsub("_", " ", name)
+                result = substr($0, index($0, "... ") + 4)
+                if (result == "ok") s = "yes"
+                else if (result ~ /^ignored, /) { sub(/^ignored, /, "", result); s = result }
+                else s = "**failing**"
+                print "| " name " | " s " |"
+              }' > rows.md
+            {
+              echo "## $title in drydock"
+              echo
+              echo "From \`tests/$file.rs\`: supported means a test shows it."
+              echo
+              echo "| Feature | Simulated |"
+              echo "|---|---|"
+              cat rows.md
+              echo
+            } >> "$GITHUB_STEP_SUMMARY"
+          done
 
       # The example arm on vcan0, driven by the example bus master for three
       # seconds: every motor must answer, enabled. Its shoulder dies at 1 s
@@ -113,3 +117,18 @@ jobs:
           kill $drydock && wait $drydock || true
           grep -q '^master ids: 0x11 0x12 0x13 0x14 0x15 0x16 0x17 0x18$' hold.log || { echo "openarm_can didn't find all eight motors"; cat openarm.log; exit 1; }
           tail -n 1 hold.log | awk '{ if ($8 < 1.45 || $8 > 1.75) { print "the elbow isn'"'"'t holding a quarter turn: " $8; exit 1 } }'
+
+      # Pollen's servo library (rustypot 1.8.0, as the Microduck's runtime
+      # uses it) driving drydock's XL330 through its serial port: it must
+      # find the servo, set it up, and lift its arm level.
+      - name: A Dynamixel servo, driven by Pollen's library
+        run: |
+          check=$RUNNER_TEMP/rustypot-check
+          mkdir -p $check/src && cp examples/xl330/rustypot.rs $check/src/main.rs
+          printf '[package]\nname = "rustypot-check"\nversion = "0.0.0"\nedition = "2021"\n\n[dependencies]\nrustypot = "=1.8.0"\nserialport = { version = "4", default-features = false }\n' > $check/Cargo.toml
+          cargo build --release --manifest-path $check/Cargo.toml
+          ./target/release/drydock examples/xl330/robot.yml > xl330.log 2>&1 &
+          drydock=$!
+          timeout 60 sh -c 'until grep -q "robot.s serial port" xl330.log; do sleep 0.2; done' || { cat xl330.log; exit 1; }
+          $check/target/release/rustypot-check /tmp/drydock-xl330 || { cat xl330.log; exit 1; }
+          kill $drydock && wait $drydock || true

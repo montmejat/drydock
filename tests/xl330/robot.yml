@@ -1,0 +1,8 @@
+scene: pair.xml
+keyframe: down
+serial:
+  - port: /tmp/drydock-test-pair
+    motors:
+      - { joint: a, model: XL330-M288, id: 1 }
+      - { joint: b, model: XL330-M288, id: 2 }
+power: { volts: 5.0, battery: true }

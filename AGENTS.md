@@ -9,19 +9,22 @@ brief. `docs/` has the rest: the robot file (`robot-file.md`), scenarios
 
 ## What drydock promises
 
-- **To be the hardware, frame for frame.** Software that drives Damiao's
-  motors over SocketCAN must not be able to tell drydock from the real
-  motors: the same frames, the same answers, the same timing on the bus.
+- **To be the hardware, frame for frame.** Software that drives the motors
+  (Damiao's over SocketCAN, Dynamixel servos over a serial port) must not
+  be able to tell drydock from the real ones: the same frames and bytes,
+  the same answers, the same timing on the bus.
   When the real motors and a simpler model disagree, the real motors win.
   Every claim about a protocol comes from a source (`docs/simulation.md`,
   Sources), never from a guess; where the sources are silent, say so rather
   than invent.
-- **One protocol, done completely**: Damiao's MIT mode. Its coverage is
-  `tests/damiao.rs`: one test per feature, and an ignored test with its
-  reason for each gap. A new feature, or a gap closed, changes that file;
-  CI turns it into the support table.
+- **Each protocol done completely**: Damiao's motors on CAN, and
+  Dynamixel's Protocol 2.0 with the XL330 on a serial line. Their coverage
+  is `tests/damiao.rs` and `tests/dynamixel.rs`: one test per feature, and an
+  ignored test with its reason for each gap. A new feature, or a gap
+  closed, changes those files; CI turns them into the support tables. A new
+  protocol is the user's call.
 - **No dependency on keel**, or on any one bus master. drydock is useful to
-  anyone with SocketCAN software.
+  anyone with SocketCAN or serial software.
 - **MuJoCo only through `shim/world.c`.** Rust never mirrors MuJoCo's
   structs. MuJoCo is one documented download; the build never reaches the
   network.

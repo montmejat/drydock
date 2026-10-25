@@ -9,7 +9,7 @@ pub mod timing;
 
 use std::ffi::CString;
 use std::io;
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::time::Duration;
 
 /// A frame with an 11-bit id: classic, or CAN FD.
@@ -172,29 +172,15 @@ impl Socket {
     /// The next frame, waiting at most `timeout` (`None`: as long as it
     /// takes). `None` if none came in time.
     pub fn recv(&self, timeout: Option<Duration>) -> io::Result<Option<Frame>> {
-        if wait_any(&[self], timeout)?.first() == Some(&true) {
+        if crate::poll::wait_any(&[self.as_raw_fd()], timeout)?.first() == Some(&true) {
             return self.try_recv();
         }
         Ok(None)
     }
 }
 
-/// Waits at most `timeout` (`None`: as long as it takes) for any of
-/// `sockets` to have a frame, and says which do. An interrupted wait ends
-/// early, with none.
-pub fn wait_any(sockets: &[&Socket], timeout: Option<Duration>) -> io::Result<Vec<bool>> {
-    let mut fds: Vec<libc::pollfd> =
-        sockets.iter().map(|s| libc::pollfd { fd: s.socket.as_raw_fd(), events: libc::POLLIN, revents: 0 }).collect();
-    let ts = timeout.map(|t| libc::timespec { tv_sec: t.as_secs() as _, tv_nsec: t.subsec_nanos() as _ });
-    let ts_ptr = ts.as_ref().map_or(std::ptr::null(), |t| t as *const libc::timespec);
-    // SAFETY: `fds` and the optional timespec live through the call.
-    let ready = unsafe { libc::ppoll(fds.as_mut_ptr(), fds.len() as _, ts_ptr, std::ptr::null()) };
-    if ready < 0 {
-        let e = io::Error::last_os_error();
-        if e.kind() != io::ErrorKind::Interrupted {
-            return Err(e);
-        }
-        return Ok(vec![false; sockets.len()]);
+impl AsRawFd for Socket {
+    fn as_raw_fd(&self) -> RawFd {
+        self.socket.as_raw_fd()
     }
-    Ok(fds.iter().map(|f| f.revents & libc::POLLIN != 0).collect())
 }

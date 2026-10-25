@@ -1,0 +1,23 @@
+<!-- One Dynamixel XL330 swinging a 100 g mass on a 10 cm arm, in a vertical
+     plane: a bench like the one BAM's XL330 model was measured on. The
+     armature is BAM's rotor inertia (m6); the servo's friction is set each
+     step by drydock, from BAM's model, so none here. -->
+<mujoco model="xl330-bench">
+  <option timestep="0.002" integrator="implicitfast"/>
+
+  <worldbody>
+    <light pos="0 0 1"/>
+    <body name="base" pos="0 0 0.3">
+      <geom type="box" size="0.012 0.017 0.010" rgba="0.2 0.2 0.25 1"/>
+      <body name="arm">
+        <joint name="horn" type="hinge" axis="0 1 0" armature="0.0018077432831600838"/>
+        <geom type="capsule" fromto="0 0 0 0.1 0 0" size="0.004" mass="0.01" rgba="0.75 0.75 0.8 1"/>
+        <geom type="sphere" pos="0.1 0 0" size="0.015" mass="0.1" rgba="0.8 0.4 0.3 1"/>
+      </body>
+    </body>
+  </worldbody>
+
+  <keyframe>
+    <key name="down" qpos="1.5708"/>
+  </keyframe>
+</mujoco>
