@@ -25,6 +25,12 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
 
+      # OpenArm's model, which drydock fetches on its first run.
+      - uses: actions/cache@v6
+        with:
+          path: ~/.cache/drydock/models
+          key: models-${{ hashFiles('examples/*/robot.yml') }}
+
       # MuJoCo: the one download drydock needs, as its build error says.
       - uses: actions/cache@v6
         id: mujoco
@@ -80,11 +86,30 @@ jobs:
           cargo build --release --bins --example wave
           printf 'faults: [{ joint: shoulder, fault: dead, at: 1 s, lasts: 500 ms }]\n' > dies.scenario.yml
           ./target/release/drydock examples/arm/robot.yml --scenario dies.scenario.yml > drydock.log 2>&1 &
+          drydock=$!
           sleep 1
           ./target/release/examples/wave examples/arm/robot.yml --seconds 3 | tee wave.log
-          kill %1 || true
+          kill $drydock && wait $drydock || true
           last=$(tail -n 1 wave.log)
           echo "$last" | grep -q silent && { echo "a motor didn't answer"; cat drydock.log; exit 1; }
           echo "$last" | grep -q '\[1\].*\[1\]' || { echo "a motor isn't enabled"; cat drydock.log; exit 1; }
           grep -q 'shoulder breaks: dead, for 0.500 s' drydock.log || { echo "no fault reported"; cat drydock.log; exit 1; }
           grep -q 'shoulder recovers from dead' drydock.log || { echo "no recovery reported"; cat drydock.log; exit 1; }
+
+      # OpenArm's own CAN library (openarm_can, as openarm_ros2 uses it)
+      # driving drydock's OpenArm through examples/openarm/hold.cpp: software
+      # written for the real arm must find all eight motors and hold the
+      # home pose, the elbow at a quarter turn.
+      - name: OpenArm, driven by its own library
+        run: |
+          c=~/.cache/drydock/openarm_can-1.4.1
+          git clone -q --depth 1 --branch 1.4.1 https://github.com/enactic/openarm_can $c
+          g++ -std=c++17 -O2 -I $c/include examples/openarm/hold.cpp $c/src/openarm/*/*.cpp $c/src/openarm/can/socket/*.cpp \
+            -o examples/openarm/hold
+          ./target/release/drydock examples/openarm/robot.yml > openarm.log 2>&1 &
+          drydock=$!
+          timeout 300 sh -c 'until grep -q "in real time" openarm.log; do sleep 1; done' || { cat openarm.log; exit 1; }
+          examples/openarm/hold 5 | tee hold.log
+          kill $drydock && wait $drydock || true
+          grep -q '^master ids: 0x11 0x12 0x13 0x14 0x15 0x16 0x17 0x18$' hold.log || { echo "openarm_can didn't find all eight motors"; cat openarm.log; exit 1; }
+          tail -n 1 hold.log | awk '{ if ($8 < 1.45 || $8 > 1.75) { print "the elbow isn'"'"'t holding a quarter turn: " $8; exit 1 } }'

@@ -96,6 +96,9 @@ t =  2.5 s -0.26 -0.00 -0.00 +1.64 -0.00 -0.00 +0.06 | gripper -1.03 rad -0.10 N
 On CAN FD, as OpenArm's motors are by default (`hold --classic` tries a
 classic master against them: it hears nothing, as on a real bus).
 
+CI runs it on every pull request: OpenArm's library must find all eight
+motors and hold the home pose.
+
 ## Design
 
 [docs/architecture.md](docs/architecture.md): the pieces, how a frame and a
