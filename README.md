@@ -142,6 +142,9 @@ A bus:
   error frames. The interface must carry CAN FD: its MTU 72 (drydock says
   how, if not).
 - `bitrate`, `data_bitrate`: how fast frames cross the bus (see Time).
+  Damiao's motors run classic CAN at 125, 200, 250 or 500 kbit/s or
+  1 Mbit/s, and CAN FD's data phase at 2, 2.5, 3.2, 4 or 5 Mbit/s: a bus at
+  another rate is an error. Their `CAN_BR` register starts at the bus's.
 - `reply_us`: from a frame reaching a motor to its answer being ready to
   go. Unknown for Damiao's motors, so none by default.
 
@@ -160,7 +163,8 @@ A motor:
 - `rated_torque`: what the motor may give for as long as it likes, N m:
   what sets how hot it gets (see Heat). A third of `peak_torque` by default.
 - `timeout_ms`: without a frame for this long, the motor disables itself with
-  status `D` (communication lost). Off by default.
+  status `D` (communication lost). Off by default. It's the `TIMEOUT`
+  register, in its units of 50 µs, which a bus master may write.
 - `encoder: { delay_ms, bias, drift, noise, quantum }`: what the motor's
   encoder gets wrong, in radians (perfect by default). Its firmware closes
   its loop on that reading, and answers with it. Seeded: a run repeats.
@@ -237,7 +241,11 @@ one per feature, and so is every gap: CI turns them into a table on each
 | Enable `FC`, disable `FD`, zero `FE`, clear error `FB` | each answered with feedback; enabling starts from no command; a motor in error stays in it until cleared |
 | Feedback, on `master_id` | after every frame, as the real motors answer: status, id, position, velocity, torque, and the drive's and coil's temperatures |
 | Over-temperature | past `OT_Value` (120 °C), status `B` (the drive) or `C` (the coil) and no torque, until cleared; see Heat |
-| Registers, through `0x7FF` | read and write `OT_Value`, `MST_ID`, `ESC_ID`, `CTRL_MODE`, `PMAX`, `VMAX`, `TMAX`; refresh (`CC`) answers with feedback; save (`AA`) answers nothing |
+| Registers, through `0x7FF` | every register in Damiao's table, read and written within its range; a refused write answers with the value kept; refresh (`CC`) answers with feedback; save (`AA`) answers done, while disabled |
+| Ids, `ESC_ID` and `MST_ID` | a new id takes effect at once: commands go to it, answers come from the new master id |
+| Timeout, `TIMEOUT` | in 50 µs; 0 for none |
+| Bit rate, `CAN_BR` (0 to 9) | answered at the old rate; then a motor at another rate than the bus's neither hears nor answers, until drydock restarts |
+| Output position, `xout` | as feedback reports it |
 | Packing | 16 bits of position, 12 of velocity, torque and gains, clamped to their ranges, as the real motors pack them |
 
 Not yet, or not at all:
@@ -247,16 +255,21 @@ Not yet, or not at all:
   publish; drydock's match the MIT gains OpenArm's driver uses (a speed gain
   of TMAX / 20 per rad/s, an integral at ten per second, a position gain of
   20 per second), and the registers aren't simulated.
-- **Ids can't be rewritten** over the bus; they're the robot file's.
-- **Registers other than the seven above** get no answer, with a note. That
-  includes `TIMEOUT` (9): its units aren't in the sources below, so the
-  timeout is set in the robot file instead.
+- **Registers drydock has no model for.** Their values aren't published
+  (versions, the motor's resistance, inductance and gear ratio, the factory
+  loop gains), so they get no answer until written, with a note, rather
+  than a made-up one. Written within their range, they keep the value and
+  answer with it, but nothing changes: the other modes' gains among them.
+- **Two motors on one id.** A write of another motor's `ESC_ID` is refused,
+  with a note: on a real bus both motors would take its frames.
 - **No power supply.** Overvoltage, undervoltage, overcurrent and overload
   are never reported.
 - **A lost frame is just lost.** On a real bus a corrupted frame is caught
   by its CRC, flagged with an error frame and sent again, and a node that
-  errs too often goes bus-off. drydock's link faults lose frames outright:
-  no error frames, retransmissions, error counters or bus-off.
+  errs too often goes bus-off. drydock's link faults lose frames outright,
+  and a motor at another bit rate is silent: no error frames,
+  retransmissions, error counters or bus-off. vcan has no controller to
+  report them.
 
 ## Heat
 
@@ -342,3 +355,9 @@ The protocol is from Damiao's manual for the DM-J4310-2EC and their
 reference driver, `DM_CAN.py` in DM_Control_Python: frame layouts, packing,
 the special frames, registers and the factory ranges. OpenArm's
 `openarm_can` agrees on every frame, and adds the DM3507's ranges.
+Enactic's copy of Damiao's manual for the DM-J4340P-2EC
+([damiao.enactic.ai](https://damiao.enactic.ai/en/products/hardware/dm-j4340p-2ec-v1.0/))
+gives the register table with each register's range, the bit-rate codes,
+and the save's answer. The `TIMEOUT` register's unit, 50 µs, is from the
+[damiao-motor](https://damiao-motor.jia-xie.com/concept/registers/) Python
+driver's documentation; Damiao's own doesn't say.

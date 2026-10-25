@@ -29,7 +29,7 @@ use std::process::Command;
 use serde::Deserialize;
 
 use crate::can::timing::Rates;
-use crate::damiao::{Limits, Model, REGISTER_ID};
+use crate::damiao::{bit_rate, reg, Limits, Model, REGISTER_ID};
 use crate::drivetrain::Transmission;
 use crate::effects::EncoderSettings;
 
@@ -200,6 +200,11 @@ impl MotorSpec {
     pub fn rated_torque(&self) -> f64 {
         self.rated_torque.unwrap_or(self.peak_torque() / 3.0)
     }
+
+    /// The `TIMEOUT` register: `timeout_ms` in its units, 0 for none.
+    pub fn timeout(&self) -> u32 {
+        self.timeout_ms.map_or(0, |ms| (ms / 1e3 / reg::TIMEOUT_UNIT).round().max(1.0) as u32)
+    }
 }
 
 impl Robot {
@@ -258,6 +263,14 @@ fn check_bus(bus: &BusSpec) -> Result<(), String> {
     {
         return Err("bit rates are above zero, reply_us zero or more".into());
     }
+    if bit_rate::code(bus.fd, bus.bitrate, bus.data_bitrate).is_none() {
+        let (what, rate) = if bus.fd { ("data_bitrate", bus.data_bitrate) } else { ("bitrate", bus.bitrate) };
+        return Err(format!(
+            "{what} {rate}: Damiao's motors run {} at {} bit/s",
+            if bus.fd { "CAN FD's data phase" } else { "classic CAN" },
+            bit_rate::choices(bus.fd)
+        ));
+    }
     let mut ids: Vec<(u16, &str)> = Vec::new();
     for m in &bus.motors {
         for (id, what) in [(m.id, "id"), (m.master_id, "master_id")] {
@@ -284,4 +297,26 @@ fn check_bus(bus: &BusSpec) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn check(yaml: &str) -> Result<(), String> {
+        serde_yaml::from_str::<Robot>(yaml).unwrap().check()
+    }
+
+    #[test]
+    fn buses_run_at_rates_damiaos_motors_run_at() {
+        let bus = |rates: &str| {
+            format!(
+                "scene: a.xml\nbuses: [{{ can: vcan0, {rates} motors: [{{ joint: j, model: DM4310, id: 1, master_id: 0x11 }}] }}]"
+            )
+        };
+        assert!(check(&bus("")).is_ok());
+        assert!(check(&bus("fd: true,")).is_ok());
+        assert!(check(&bus("bitrate: 800000,")).unwrap_err().contains("125000, 200000, 250000, 500000, 1000000"));
+        assert!(check(&bus("fd: true, data_bitrate: 8000000,")).unwrap_err().contains("data_bitrate 8000000"));
+    }
 }

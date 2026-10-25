@@ -13,7 +13,7 @@
 //! - **The motor answers each frame** with feedback on its master id: its
 //!   status and id, then position, velocity, torque and two temperatures.
 //! - **Registers** are read and written through id `0x7FF`, and answered on
-//!   the master id.
+//!   the master id, as is a save into flash.
 //! - **Other modes** than MIT, chosen with the `CTRL_MODE` register, take
 //!   their commands at `id + 0x100` (position-velocity), `id + 0x200`
 //!   (velocity, four bytes) and `id + 0x300` (position-force), as plain
@@ -46,23 +46,105 @@ pub mod status {
     pub const OVERLOAD: u8 = 0xE;
 }
 
-/// The registers drydock simulates, by number.
+/// The registers, by number, and what each takes: Damiao's register table
+/// (Enactic's copy of Damiao's manual, for the DM-J4340P-2EC).
 pub mod reg {
+    /// Below it, the motor stops with an undervoltage error, V.
+    pub const UV_VALUE: u8 = 0;
     /// The temperature, °C, at which the motor stops with an over-temperature
-    /// error: 80 to 200 (openarm_can's register table).
+    /// error.
     pub const OT_VALUE: u8 = 2;
+    /// Over-current, as a share of the motor's maximum current.
+    pub const OC_VALUE: u8 = 3;
     pub const MST_ID: u8 = 7;
     pub const ESC_ID: u8 = 8;
+    /// Without a frame for this long, in 50 µs, the motor stops with
+    /// communication lost; 0 for never.
     pub const TIMEOUT: u8 = 9;
     pub const CTRL_MODE: u8 = 10;
     pub const PMAX: u8 = 21;
     pub const VMAX: u8 = 22;
     pub const TMAX: u8 = 23;
+    /// Above it, the motor stops with an overvoltage error, V.
+    pub const OV_VALUE: u8 = 29;
+    /// The bus's bit rate, as a code: see [`super::bit_rate`].
+    pub const CAN_BR: u8 = 35;
+    /// The output shaft's position, rad.
+    pub const XOUT: u8 = 81;
+
+    /// TIMEOUT's unit, seconds. Not in Damiao's table; from the damiao-motor
+    /// Python driver's documentation, which converts milliseconds by 20.
+    pub const TIMEOUT_UNIT: f64 = 50e-6;
+
+    /// Whether a motor has register `rid`: the table's 0 to 36, 50 to 55,
+    /// 80 and 81.
+    pub fn exists(rid: u8) -> bool {
+        matches!(rid, 0..=36 | 50..=55 | 80 | 81)
+    }
 
     /// Whether a register holds an integer (otherwise a float), as the
     /// reference driver decides.
     pub fn is_integer(rid: u8) -> bool {
         matches!(rid, 7..=10 | 13..=16 | 35..=36)
+    }
+
+    /// Whether a write of `value` to register `rid` is within the table's
+    /// range for it. Read-only registers take nothing.
+    pub fn takes(rid: u8, value: [u8; 4]) -> bool {
+        let (x, n, max) = (f32::from_le_bytes(value), u32::from_le_bytes(value), f32::MAX);
+        match rid {
+            UV_VALUE => x > 10.0 && x <= max,
+            1 | 25..=28 => (0.0..=max).contains(&x),
+            OT_VALUE => (80.0..200.0).contains(&x),
+            OC_VALUE => x > 0.0 && x < 1.0,
+            4 => x > 0.0 && x < max,
+            5 => (-max..0.0).contains(&x),
+            // OV_Value's range is "TBD" in the table: any voltage.
+            6 | PMAX | VMAX | TMAX | OV_VALUE => x > 0.0 && x <= max,
+            MST_ID | ESC_ID => n <= 0x7FF,
+            TIMEOUT => true,
+            CTRL_MODE => (1..=4).contains(&n),
+            24 | 33 => (100.0..=1e4).contains(&x),
+            30 => x > 0.0 && x <= 1.0,
+            31 => (1.0..=30.0).contains(&x),
+            32 => x > 0.0 && x < 500.0,
+            34 => x > 0.0 && x <= 1e4,
+            // The table says 0 to 4, its section on bit rates 0 to 9.
+            CAN_BR => n <= 9,
+            _ => false,
+        }
+    }
+}
+
+/// The bit rates a motor runs its bus at, as the `CAN_BR` register codes
+/// them (Damiao's manual): 0 to 4 classic CAN, 5 to 9 CAN FD, by its data
+/// phase's rate.
+pub mod bit_rate {
+    const CLASSIC: [f64; 5] = [125e3, 200e3, 250e3, 500e3, 1e6];
+    const FD: [f64; 5] = [2e6, 2.5e6, 3.2e6, 4e6, 5e6];
+
+    /// The code for a bus on CAN FD or not, at these bit rates, if a
+    /// Damiao motor can run at them. On CAN FD, the manual names the data
+    /// phase's rate only.
+    pub fn code(fd: bool, nominal: f64, data: f64) -> Option<u32> {
+        let (rates, rate, first) = if fd { (FD, data, 5) } else { (CLASSIC, nominal, 0) };
+        rates.iter().position(|&r| r == rate).map(|i| first + i as u32)
+    }
+
+    /// What a code stands for, as a person would say it.
+    pub fn name(code: u32) -> String {
+        let mbit = |r: f64| format!("{} Mbit/s", r / 1e6);
+        match code {
+            0..=4 => format!("classic CAN at {}", mbit(CLASSIC[code as usize])),
+            5..=9 => format!("CAN FD with data at {}", mbit(FD[code as usize - 5])),
+            _ => format!("code {code}"),
+        }
+    }
+
+    /// The rates a motor can run at, for an error message.
+    pub fn choices(fd: bool) -> String {
+        let rates = if fd { FD } else { CLASSIC };
+        rates.iter().map(|r| format!("{}", r)).collect::<Vec<_>>().join(", ")
     }
 }
 
@@ -413,6 +495,23 @@ impl Register {
     }
 }
 
+/// A motor's answer to a save: done (Enactic's copy of Damiao's manual).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Saved {
+    pub motor: u16,
+}
+
+impl Saved {
+    pub fn encode(&self) -> [u8; 8] {
+        let [lo, hi] = self.motor.to_le_bytes();
+        [lo, hi, SAVE, 0x01, 0, 0, 0, 0]
+    }
+
+    pub fn decode(d: &[u8; 8]) -> Option<Self> {
+        (d[2] == SAVE).then(|| Saved { motor: u16::from_le_bytes([d[0], d[1]]) })
+    }
+}
+
 /// A motor's answer to a register read or write: the register's value
 /// after it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -502,5 +601,26 @@ mod tests {
         assert_eq!(Register::decode(&w.encode()), Some(w));
         let r = RegisterReply { motor: 1, write: false, rid: reg::MST_ID, value: 0x11u32.to_le_bytes() };
         assert_eq!(RegisterReply::decode(&r.encode()), Some(r));
+        let saved = Saved { motor: 0x102 }.encode();
+        assert_eq!(saved[..4], [0x02, 0x01, 0xAA, 0x01]);
+        assert_eq!(RegisterReply::decode(&saved), None, "not a register's value");
+    }
+
+    #[test]
+    fn register_ranges() {
+        let f = |x: f32| x.to_le_bytes();
+        assert!(reg::takes(reg::OT_VALUE, f(80.0)) && !reg::takes(reg::OT_VALUE, f(200.0)));
+        assert!(!reg::takes(reg::UV_VALUE, f(10.0)) && !reg::takes(reg::PMAX, f(f32::NAN)));
+        assert!(reg::takes(reg::ESC_ID, 0x7FFu32.to_le_bytes()) && !reg::takes(reg::ESC_ID, 0x800u32.to_le_bytes()));
+        assert!(!reg::takes(17, f(0.5)), "Rs is read-only");
+        assert!(reg::exists(81) && !reg::exists(37) && !reg::exists(82));
+    }
+
+    #[test]
+    fn bit_rates() {
+        assert_eq!(bit_rate::code(false, 1e6, 5e6), Some(4));
+        assert_eq!(bit_rate::code(true, 1e6, 5e6), Some(9));
+        assert_eq!(bit_rate::code(false, 800e3, 5e6), None);
+        assert_eq!(bit_rate::name(9), "CAN FD with data at 5 Mbit/s");
     }
 }

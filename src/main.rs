@@ -97,7 +97,13 @@ fn main_() -> Result<(), String> {
         };
         eprintln!("  {} ({kind})", bus.can);
         for (i, m) in dock.motors(b).iter().enumerate() {
-            eprintln!("    {:<22} {:#05x} -> {:#05x}  peak {} N m", m.joint, m.id, m.master_id, dock.peak_torque(b, i));
+            eprintln!(
+                "    {:<22} {:#05x} -> {:#05x}  peak {} N m",
+                m.joint,
+                m.id(),
+                m.registers().master_id,
+                dock.peak_torque(b, i)
+            );
         }
     }
     if let Some(file) = &scenario {

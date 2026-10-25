@@ -12,7 +12,7 @@
 use drydock::can::timing::{bits, Crossed, From, Rates, Timeline};
 use drydock::can::Frame;
 use drydock::damiao::{
-    mode, reg, status, Feedback, Limits, Mit, PosForce, PosVel, Register, RegisterReply, Special, Vel,
+    mode, reg, status, Feedback, Limits, Mit, PosForce, PosVel, Register, RegisterReply, Saved, Special, Vel,
 };
 use drydock::dock::Drydock;
 use drydock::robot::Robot;
@@ -47,6 +47,20 @@ fn read(dock: &mut Drydock, rid: u8) -> [u8; 4] {
     let reply = RegisterReply::decode(&reply.eight().unwrap()).unwrap();
     assert_eq!((reply.motor, reply.rid), (ID, rid));
     reply.value
+}
+
+/// Writes `value` to register `rid`: the value the motor answers it kept.
+fn write(dock: &mut Drydock, rid: u8, value: [u8; 4]) -> [u8; 4] {
+    let reply = send(dock, 0x7FF, Register::Write { motor: ID, rid, value }.encode()).expect("an answer");
+    let reply = RegisterReply::decode(&reply.eight().unwrap()).unwrap();
+    assert!(reply.write && reply.rid == rid);
+    reply.value
+}
+
+fn steps(dock: &mut Drydock, seconds: f64) {
+    for _ in 0..(seconds / dock.timestep()).round() as usize {
+        dock.step();
+    }
 }
 
 /* ── MIT mode ── */
@@ -268,16 +282,87 @@ fn register_refresh_asks_for_feedback() {
 }
 
 #[test]
-fn register_save_is_accepted() {
+fn register_save_answers_done_while_disabled() {
     let (mut dock, _) = slide();
-    send(&mut dock, 0x7FF, Register::Save { motor: ID }.encode());
-    assert_eq!(u32::from_le_bytes(read(&mut dock, reg::ESC_ID)), ID as u32);
+    let done = send(&mut dock, 0x7FF, Register::Save { motor: ID }.encode()).expect("an answer");
+    assert_eq!(done.id, MASTER);
+    assert_eq!(Saved::decode(&done.eight().unwrap()), Some(Saved { motor: ID }));
+    // A motor saves only while disabled.
+    send(&mut dock, ID, Special::Enable.encode());
+    assert!(send(&mut dock, 0x7FF, Register::Save { motor: ID }.encode()).is_none());
 }
 
 #[test]
-fn register_requests_for_another_motor_go_unanswered() {
+fn register_writes_of_the_ids_move_the_motor() {
+    let (mut dock, limits) = slide();
+    write(&mut dock, reg::MST_ID, 0x28u32.to_le_bytes());
+    let reply =
+        send(&mut dock, 0x7FF, Register::Write { motor: ID, rid: reg::ESC_ID, value: 0x09u32.to_le_bytes() }.encode());
+    let reply = reply.expect("an answer");
+    assert_eq!(reply.id, 0x28, "from its new master id");
+    assert_eq!(RegisterReply::decode(&reply.eight().unwrap()).unwrap().motor, 0x09);
+    assert!(send(&mut dock, ID, Special::Enable.encode()).is_none(), "nothing at its old id");
+    let f = send(&mut dock, 0x09, Special::Enable.encode()).expect("its new id");
+    assert_eq!(f.id, 0x28);
+    let f = Feedback::decode(&f.eight().unwrap(), limits);
+    assert_eq!((f.id, f.status), (0x9, status::ENABLED));
+}
+
+#[test]
+fn register_writes_of_another_motors_id_are_refused() {
+    // drydock doesn't simulate two motors on one id: on a real bus, both
+    // would take its frames.
+    let robot = Robot::load(concat!(env!("CARGO_MANIFEST_DIR"), "/examples/arm/robot.yml")).unwrap();
+    let mut dock = Drydock::load(&robot).unwrap();
+    let w = Register::Write { motor: 0x01, rid: reg::ESC_ID, value: 0x02u32.to_le_bytes() };
+    let reply = dock.deliver(0, &Frame::new(0x7FF, w.encode())).unwrap();
+    assert_eq!(RegisterReply::decode(&reply.eight().unwrap()).unwrap().value, 0x01u32.to_le_bytes());
+}
+
+#[test]
+fn register_writes_of_the_timeout_count_in_50_us() {
+    let (mut dock, limits) = slide();
+    assert_eq!(read(&mut dock, reg::TIMEOUT), 0u32.to_le_bytes(), "none, as the robot file says");
+    write(&mut dock, reg::TIMEOUT, 1000u32.to_le_bytes());
+    send(&mut dock, ID, Special::Enable.encode());
+    let refresh = |dock: &mut Drydock| {
+        let f = send(dock, 0x7FF, Register::Refresh { motor: ID }.encode()).unwrap();
+        feedback(f, limits).status
+    };
+    // 45 ms between frames: within 50.
+    steps(&mut dock, 0.045);
+    assert_eq!(refresh(&mut dock), status::ENABLED);
+    steps(&mut dock, 0.045);
+    assert_eq!(refresh(&mut dock), status::ENABLED);
+    steps(&mut dock, 0.06);
+    assert_eq!(refresh(&mut dock), status::COMMUNICATION_LOST);
+}
+
+#[test]
+fn register_writes_of_registers_drydock_has_no_model_for_are_kept() {
     let (mut dock, _) = slide();
-    assert!(send(&mut dock, 0x7FF, Register::Read { motor: 0x05, rid: reg::PMAX }.encode()).is_none());
+    const KP_ASR: u8 = 25;
+    const GREF: u8 = 30;
+    // Unwritten, its value isn't known: no answer, rather than a made-up one.
+    assert!(send(&mut dock, 0x7FF, Register::Read { motor: ID, rid: KP_ASR }.encode()).is_none());
+    // Within its range (Damiao's table), it keeps what's written; out of
+    // it, what it had.
+    assert_eq!(write(&mut dock, KP_ASR, 3.5f32.to_le_bytes()), 3.5f32.to_le_bytes());
+    assert_eq!(read(&mut dock, KP_ASR), 3.5f32.to_le_bytes());
+    assert_eq!(write(&mut dock, GREF, 0.8f32.to_le_bytes()), 0.8f32.to_le_bytes());
+    assert_eq!(write(&mut dock, GREF, 1.5f32.to_le_bytes()), 0.8f32.to_le_bytes());
+    // Registers outside the table get no answer.
+    for rid in [37, 49, 82] {
+        assert!(send(&mut dock, 0x7FF, Register::Read { motor: ID, rid }.encode()).is_none(), "no register {rid}");
+    }
+}
+
+#[test]
+fn register_reads_of_the_output_position() {
+    let (mut dock, limits) = slide();
+    let f = feedback(send(&mut dock, 0x7FF, Register::Refresh { motor: ID }.encode()).unwrap(), limits);
+    let xout = f32::from_le_bytes(read(&mut dock, reg::XOUT));
+    assert!((xout - f.p).abs() < 1e-3, "{xout} {}", f.p);
 }
 
 /* ── The bus ── */
@@ -334,16 +419,8 @@ fn bus_a_lossy_link_loses_about_a_tenth_of_frames_each_way() {
 /* ── Not simulated yet ── */
 
 #[test]
-#[ignore = "not simulated: ids can't be rewritten over the bus; they're the robot file's"]
-fn register_writes_of_the_ids() {}
-
-#[test]
-#[ignore = "not simulated: TIMEOUT (9) gets no answer, its units aren't in Damiao's sources; the robot file's timeout_ms sets it"]
-fn register_writes_of_the_timeout() {}
-
-#[test]
-#[ignore = "not simulated: registers other than OT_Value, MST_ID, ESC_ID, CTRL_MODE, PMAX, VMAX and TMAX get no answer, with a note"]
-fn register_reads_of_the_other_registers() {}
+#[ignore = "not simulated: unpublished values (versions, the motor's constants, factory gains) get no answer until written, and what's written to a register drydock has no model for (the other modes' gains among them) changes nothing"]
+fn register_values_drydock_has_no_model_for() {}
 
 #[test]
 fn status_overheating_stops_the_motor_until_it_cools_and_is_cleared() {
@@ -371,9 +448,16 @@ fn status_overheating_stops_the_motor_until_it_cools_and_is_cleared() {
 fn status_electrical_faults() {}
 
 #[test]
-#[ignore = "not simulated: the bus's bit rates are the robot file's"]
-fn bus_bit_rate_register() {}
+fn bus_bit_rate_register_answered_then_deaf_at_another_rate() {
+    let (mut dock, _) = slide();
+    assert_eq!(read(&mut dock, reg::CAN_BR), 4u32.to_le_bytes(), "classic CAN at 1 Mbit/s, as the robot file's bus");
+    // Out of the codes, refused.
+    assert_eq!(write(&mut dock, reg::CAN_BR, 10u32.to_le_bytes()), 4u32.to_le_bytes());
+    // 500 kbit/s: answered at the old rate, then it hears nothing.
+    assert_eq!(write(&mut dock, reg::CAN_BR, 3u32.to_le_bytes()), 3u32.to_le_bytes());
+    assert!(send(&mut dock, 0x7FF, Register::Refresh { motor: ID }.encode()).is_none());
+}
 
 #[test]
-#[ignore = "not simulated: a lost frame is just lost; no error frames, retransmissions, error counters or bus-off"]
+#[ignore = "not simulated: a lost frame is just lost, and a motor at another bit rate silent; no error frames, retransmissions, error counters or bus-off, as vcan has no controller to report them"]
 fn bus_error_frames_and_bus_off() {}
