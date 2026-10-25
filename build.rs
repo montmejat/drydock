@@ -1,13 +1,15 @@
-//! Finds MuJoCo (a release from github.com/google-deepmind/mujoco, unpacked:
-//! `MUJOCO_DIR`, or where `scripts/setup.sh` puts it), compiles the C shim
-//! against its headers with the system's `cc`, and links both.
+//! Finds MuJoCo (a release from github.com/google-deepmind/mujoco, unpacked
+//! in `~/.cache/drydock`, or in `MUJOCO_DIR`), compiles the C shim against
+//! its headers with the system's `cc`, and links both. Without it, it says
+//! how to get it: the build itself never reaches the network.
 
 use std::env;
 use std::path::PathBuf;
 use std::process::Command;
 
-/// The release the shim is written against.
+/// The release the shim is written against, and its archive's SHA-256.
 const VERSION: &str = "3.16.0";
+const SHA256: &str = "139577c541d43716a63992ab698cbc7b09788b1d547fb82b682d59b40ef49b9d";
 
 fn main() {
     println!("cargo:rerun-if-env-changed=MUJOCO_DIR");
@@ -18,7 +20,14 @@ fn main() {
     };
     let (include, lib) = (dir.join("include"), dir.join("lib"));
     if !include.join("mujoco/mujoco.h").exists() || !lib.join("libmujoco.so").exists() {
-        panic!("no MuJoCo {VERSION} in {}: scripts/setup.sh fetches it, or set MUJOCO_DIR", dir.display());
+        let archive = format!("mujoco-{VERSION}-linux-x86_64.tar.gz");
+        panic!(
+            "\n\nno MuJoCo {VERSION} in {}. Fetch it once:\n\n  mkdir -p ~/.cache/drydock && cd ~/.cache/drydock && \
+             curl -fLO https://github.com/google-deepmind/mujoco/releases/download/{VERSION}/{archive} && \
+             echo \"{SHA256}  {archive}\" | sha256sum -c && tar xzf {archive} && rm {archive}\n\n\
+             or point MUJOCO_DIR at an unpacked release.\n",
+            dir.display()
+        );
     }
 
     let out = PathBuf::from(env::var_os("OUT_DIR").unwrap());

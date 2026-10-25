@@ -127,7 +127,8 @@ time.
 **The scene (MJCF) is the mechanics**: links, masses, inertias, joint
 limits, rotor inertia (`armature`), damping, friction. It's the robot's own
 model, unchanged: OpenArm's comes from `openarm_mujoco` as Enactic publishes
-it. Its actuators on driven joints are silenced (zero gain and bias), since
+it, which the robot file names by repository and commit, and drydock fetches
+on first run. Its actuators on driven joints are silenced (zero gain and bias), since
 drydock's motors drive those joints now.
 
 **The robot file is what drives it**: its buses, each with its interface,
@@ -209,6 +210,11 @@ is the bus master's job, or its health checks'. Run against keel with the
 elbow dying at 2 s, the elbow drops to its stop within a second, and nothing
 in the logs says so.
 
+**Nothing to set up but what the system needs.** No setup scripts: MuJoCo
+is one documented download (the build says it when it's missing, and never
+reaches the network itself); a robot's model is fetched on first run, pinned
+by commit; a missing interface is answered with the command that makes it.
+
 **Lockstep has no timing.** It's for repeatable, faster-than-real-time runs;
 frames taking time would only add delays the master can't see in its
 stamps.
@@ -249,8 +255,8 @@ section 2.
 supports it; an example doesn't exist yet.
 
 **A test of OpenArm.** Today it's run by hand. A test needs the model, which
-`setup.sh` fetches; an ignored test, or one that skips without it, run in CI
-after `setup.sh`.
+drydock fetches on first run (with the network); an ignored test, or one that
+skips without it.
 
 **Seeing it.** MuJoCo's viewer, or a recording of states to replay later;
 today drydock prints nothing while it runs, but for a busy bus.

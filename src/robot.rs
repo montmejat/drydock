@@ -3,7 +3,8 @@
 //! drives it.
 //!
 //! ```yaml
-//! scene: arm.xml              # relative to this file
+//! scene: arm.xml              # relative to this file; or a robot's published model, fetched once:
+//! # scene: { git: https://github.com/enactic/openarm_mujoco, commit: a3c8a57…, file: v1/openarm.xml }
 //! keyframe: home              # optional: where it starts
 //! buses:
 //!   - can: vcan0              # the interface
@@ -21,7 +22,9 @@
 //! seed: 0                     # optional: for the encoders' noise
 //! ```
 
+use std::fmt;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use serde::Deserialize;
 
@@ -33,7 +36,7 @@ use crate::effects::{EncoderSettings, Fault};
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Robot {
-    pub scene: PathBuf,
+    pub scene: Scene,
     #[serde(default)]
     pub keyframe: Option<String>,
     pub buses: Vec<BusSpec>,
@@ -43,6 +46,73 @@ pub struct Robot {
     /// The directory the file is in, which paths in it are relative to.
     #[serde(skip)]
     pub dir: PathBuf,
+}
+
+/// Where the robot's model is: a file, or a file in a repository, at a
+/// pinned commit, fetched once into drydock's cache.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum Scene {
+    File(PathBuf),
+    Git { git: String, commit: String, file: PathBuf },
+}
+
+impl fmt::Display for Scene {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            Scene::File(path) => write!(f, "{}", path.display()),
+            Scene::Git { git, commit, file } => {
+                write!(f, "{} at {}: {}", repository_name(git), &commit[..commit.len().min(7)], file.display())
+            }
+        }
+    }
+}
+
+fn repository_name(git: &str) -> &str {
+    git.trim_end_matches('/').trim_end_matches(".git").rsplit('/').next().unwrap_or(git)
+}
+
+/// Where drydock keeps what it fetches: `$DRYDOCK_CACHE`, or
+/// `~/.cache/drydock`.
+pub fn cache_dir() -> PathBuf {
+    match std::env::var_os("DRYDOCK_CACHE") {
+        Some(dir) => PathBuf::from(dir),
+        None => PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".cache/drydock"),
+    }
+}
+
+/// A repository's commit, fetched into the cache unless it's there already:
+/// one commit deep, only the top folder `file` is in (robot repositories
+/// carry many models' meshes), with `git`, into a folder renamed into place
+/// once whole.
+fn fetch(git: &str, commit: &str, file: &Path) -> Result<PathBuf, String> {
+    let short = &commit[..commit.len().min(12)];
+    let dir = cache_dir().join("models").join(format!("{}-{short}", repository_name(git)));
+    if dir.is_dir() {
+        return Ok(dir);
+    }
+    eprintln!("drydock: fetching {} at {short}, once, into {}", repository_name(git), dir.display());
+    let part = dir.with_extension("part");
+    let _ = std::fs::remove_dir_all(&part);
+    std::fs::create_dir_all(&part).map_err(|e| format!("can't make {}: {e}", part.display()))?;
+    let folder = file.components().next().filter(|_| file.components().count() > 1);
+    let folder = folder.map(|c| c.as_os_str().to_string_lossy().into_owned());
+    let mut steps: Vec<Vec<&str>> = vec![vec!["init", "-q"]];
+    if let Some(folder) = &folder {
+        steps.push(vec!["sparse-checkout", "set", folder]);
+    }
+    steps.push(vec!["fetch", "--depth", "1", "--filter=blob:none", git, commit]);
+    steps.push(vec!["-c", "advice.detachedHead=false", "checkout", "-q", "FETCH_HEAD"]);
+    for args in &steps {
+        let status = Command::new("git").arg("-C").arg(&part).args(args).status();
+        match status {
+            Ok(s) if s.success() => {}
+            Ok(_) => return Err(format!("couldn't fetch {git} at {commit} (`git {}` failed)", args.join(" "))),
+            Err(e) => return Err(format!("can't run git, which fetches robot models: {e}")),
+        }
+    }
+    std::fs::rename(&part, &dir).map_err(|e| format!("can't move {} into place: {e}", part.display()))?;
+    Ok(dir)
 }
 
 /// A CAN bus of Damiao motors.
@@ -137,8 +207,13 @@ impl Robot {
         Ok(robot)
     }
 
-    pub fn scene_path(&self) -> PathBuf {
-        self.dir.join(&self.scene)
+    /// The scene's file, fetching it first if it comes from a repository
+    /// that isn't in the cache yet.
+    pub fn scene_path(&self) -> Result<PathBuf, String> {
+        match &self.scene {
+            Scene::File(path) => Ok(self.dir.join(path)),
+            Scene::Git { git, commit, file } => Ok(fetch(git, commit, file)?.join(file)),
+        }
     }
 
     /// Breaks the motor on `joint`: `--break joint:dead@10`.

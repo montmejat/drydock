@@ -5,6 +5,8 @@
 // and closes the gripper, and prints where each joint is twice a second.
 //
 //   examples/openarm/hold [seconds] [--classic]     (vcan0, CAN FD unless --classic)
+//
+// Built against openarm_can 1.4.1: see the README's OpenArm section.
 
 #include <chrono>
 #include <cmath>

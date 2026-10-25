@@ -12,20 +12,49 @@ drydock speaks one protocol, and tries to speak it completely: **Damiao's
 motors in MIT mode** (DM-J4310, DM-J4340, DM-J8009 and the rest), as on
 OpenArm and many other arms and legs.
 
+## Install
+
+Linux (x86-64), with Rust, a C compiler, `git` and `curl`. On Debian or
+Ubuntu:
+
+```sh
+sudo apt install build-essential git curl
+curl https://sh.rustup.rs -sSf | sh       # Rust, if you don't have it
+```
+
+MuJoCo 3.16.0, once, into `~/.cache/drydock` (or anywhere, with `MUJOCO_DIR`
+pointing at it). The build says the same if it's missing:
+
+```sh
+mkdir -p ~/.cache/drydock && cd ~/.cache/drydock && \
+  curl -fLO https://github.com/google-deepmind/mujoco/releases/download/3.16.0/mujoco-3.16.0-linux-x86_64.tar.gz && \
+  echo "139577c541d43716a63992ab698cbc7b09788b1d547fb82b682d59b40ef49b9d  mujoco-3.16.0-linux-x86_64.tar.gz" | sha256sum -c && \
+  tar xzf mujoco-3.16.0-linux-x86_64.tar.gz && rm mujoco-3.16.0-linux-x86_64.tar.gz
+```
+
+Then:
+
+```sh
+cargo install --path .                    # or: cargo build --release
+```
+
+A virtual CAN interface needs root, once per boot; drydock says so, with the
+command, when it's missing:
+
+```sh
+sudo ip link add dev vcan0 type vcan && sudo ip link set vcan0 mtu 72 up
+```
+
 ## Try it
 
 ```sh
-scripts/setup.sh                 # fetches MuJoCo 3.16.0 into ~/.cache/drydock
-sudo scripts/vcan.sh             # makes vcan0, once per boot
-cargo build --release --all-targets
-
-./target/release/drydock examples/arm/robot.yml
+drydock examples/arm/robot.yml
 ```
 
 In another terminal, a bus master swings the example arm's two joints:
 
 ```sh
-./target/release/examples/wave examples/arm/robot.yml
+cargo run --release --example wave -- examples/arm/robot.yml
 ```
 
 ```
@@ -39,13 +68,24 @@ MuJoCo frame by frame without a bus.
 ## OpenArm
 
 [OpenArm](https://github.com/enactic/openarm) v1, one arm and its gripper,
-on OpenArm's own MuJoCo model, driven by OpenArm's own CAN library
-(`openarm_can`) with the motor types, ids and gains of its ROS 2 driver:
+on Enactic's own MuJoCo model, which drydock fetches on first run (the
+robot file names its repository and commit):
 
 ```sh
-examples/openarm/setup.sh        # fetches the model and openarm_can, builds hold
-./target/release/drydock examples/openarm/robot.yml
-examples/openarm/hold            # in another terminal
+drydock examples/openarm/robot.yml
+```
+
+[keel](https://github.com/montmejat/keel) drives it: `keel run
+examples/openarm.yml` there. So can OpenArm's own CAN library, `openarm_can`,
+with the motor types, ids and gains of its ROS 2 driver, through
+`examples/openarm/hold.cpp`:
+
+```sh
+git clone -q --depth 1 --branch 1.4.1 https://github.com/enactic/openarm_can ~/.cache/drydock/openarm_can-1.4.1
+c=~/.cache/drydock/openarm_can-1.4.1
+g++ -std=c++17 -O2 -I $c/include examples/openarm/hold.cpp $c/src/openarm/*/*.cpp $c/src/openarm/can/socket/*.cpp \
+  -o examples/openarm/hold
+examples/openarm/hold            # in another terminal from drydock
 ```
 
 ```
@@ -69,7 +109,8 @@ says what drives it: one or more CAN buses (two arms are often two buses),
 each with its motors.
 
 ```yaml
-scene: arm.xml              # relative to this file
+scene: arm.xml              # relative to this file, or a published model, fetched once:
+# scene: { git: https://github.com/enactic/openarm_mujoco, commit: a3c8a57…, file: v1/openarm.xml }
 keyframe: home              # optional: where it starts
 buses:
   - can: vcan0              # the interface
@@ -85,13 +126,18 @@ buses:
 seed: 0                     # optional: for the encoders' noise
 ```
 
+The scene: a file next to the robot file, or a file in a repository at a
+pinned commit (`git`, `commit`, `file`), which drydock fetches the first
+time it runs, with `git`, into `~/.cache/drydock/models` (or
+`$DRYDOCK_CACHE`): one commit deep, only the folder the file is in.
+
 A bus:
 
 - `fd`: the motors answer in CAN FD (8 bytes, data at the faster bit rate),
   and understand both kinds, as CAN FD controllers do. Motors on classic
   CAN ignore CAN FD frames, with a note: on a real bus they'd answer with
-  error frames. The interface must carry CAN FD (`scripts/vcan.sh` makes it
-  so).
+  error frames. The interface must carry CAN FD: its MTU 72 (drydock says
+  how, if not).
 - `bitrate`, `data_bitrate`: how fast frames cross the bus (see Time).
 - `reply_us`: from a frame reaching a motor to its answer being ready to
   go. Unknown for Damiao's motors, so none by default.

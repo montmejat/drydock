@@ -26,7 +26,7 @@ struct Bus {
 
 impl Drydock {
     pub fn load(robot: &Robot) -> Result<Self, String> {
-        let mut world = World::load(&robot.scene_path())?;
+        let mut world = World::load(&robot.scene_path()?)?;
         if let Some(k) = &robot.keyframe {
             world.keyframe(k)?;
         }

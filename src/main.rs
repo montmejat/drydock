@@ -62,12 +62,15 @@ fn main_() -> Result<(), String> {
     for bus in &robot.buses {
         let name = &bus.can;
         let socket = Socket::open(name).map_err(|e| {
-            format!("can't open the CAN interface `{name}`: {e}\n(`sudo scripts/vcan.sh {name}` makes a virtual one)")
+            format!(
+                "can't open the CAN interface `{name}`: {e}. A virtual one, once per boot:\n\n  \
+                 sudo ip link add dev {name} type vcan && sudo ip link set {name} mtu 72 up\n"
+            )
         })?;
         if bus.fd && !socket.fd_capable() {
             return Err(format!(
-                "the motors on `{name}` are on CAN FD, but it carries classic frames only\n\
-                 (`sudo scripts/vcan.sh {name}` makes it carry both)"
+                "the motors on `{name}` are on CAN FD, but it carries classic frames only. To carry both:\n\n  \
+                 sudo ip link set {name} down && sudo ip link set {name} mtu 72 up\n"
             ));
         }
         lines.push(Line { name: name.clone(), socket, rates: bus.rates(), reply: bus.reply_us / 1e6 });
@@ -77,7 +80,7 @@ fn main_() -> Result<(), String> {
         Some(hz) => format!("in lockstep at {hz} Hz"),
         None => "in real time".into(),
     };
-    eprintln!("drydock: {}, {pace}, {} ms steps", robot.scene.display(), dock.timestep() * 1e3);
+    eprintln!("drydock: {}, {pace}, {} ms steps", robot.scene, dock.timestep() * 1e3);
     for (b, bus) in robot.buses.iter().enumerate() {
         let kind = match bus.fd {
             true => format!("CAN FD, {} / {} Mbit/s", bus.bitrate / 1e6, bus.data_bitrate / 1e6),
