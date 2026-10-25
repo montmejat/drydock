@@ -154,6 +154,8 @@ A motor:
 - `id`, `master_id`: where commands go, where answers come from.
 - `peak_torque`: the most the motor gives, N m. TMAX by default, which is
   only the range torque is packed into: a DM-J4310 peaks at 7 N m, not 10.
+- `rated_torque`: what the motor may give for as long as it likes, N m:
+  what sets how hot it gets (see Heat). A third of `peak_torque` by default.
 - `timeout_ms`: without a frame for this long, the motor disables itself with
   status `D` (communication lost). Off by default.
 - `encoder: { delay_ms, bias, drift, noise, quantum }`: what the motor's
@@ -187,8 +189,10 @@ drydock examples/openarm/robot.yml --scenario examples/openarm/elbow-dies.scenar
 ```
 
 - `fault`: `dead` (no torque), `weak` (a fifth of it), `freeze` (the
-  encoder repeats its last reading), `noisy` (its noise twentyfold). A broken
-  motor still says it's enabled: finding out is the bus master's job.
+  encoder repeats its last reading), `noisy` (its noise twentyfold),
+  `overheat` (it has lost most of its cooling: it heats five times as fast).
+  A broken motor still says it's enabled until its firmware has something
+  to say (an overheated one does): finding out is the bus master's job.
 - `at` or `every`: when. `every` is the mean time between two, at random
   (any moment as likely as the next). In simulated time: `s` or `ms`.
 - `joint`: one of the robot's, or `any`, drawn each time.
@@ -220,8 +224,9 @@ one per feature, and so is every gap: CI turns them into a table on each
 |---|---|
 | MIT command, to `id` | `kp (p_des - p) + kd (v_des - v) + t_ff`, every physics step, within `peak_torque` |
 | Enable `FC`, disable `FD`, zero `FE`, clear error `FB` | each answered with feedback; enabling starts from no command; a motor in error stays in it until cleared |
-| Feedback, on `master_id` | after every frame, as the real motors answer: status, id, position, velocity, torque, temperatures |
-| Registers, through `0x7FF` | read and write `MST_ID`, `ESC_ID`, `CTRL_MODE`, `PMAX`, `VMAX`, `TMAX`; refresh (`CC`) answers with feedback; save (`AA`) answers nothing |
+| Feedback, on `master_id` | after every frame, as the real motors answer: status, id, position, velocity, torque, and the drive's and coil's temperatures |
+| Over-temperature | past `OT_Value` (120 °C), status `B` (the drive) or `C` (the coil) and no torque, until cleared; see Heat |
+| Registers, through `0x7FF` | read and write `OT_Value`, `MST_ID`, `ESC_ID`, `CTRL_MODE`, `PMAX`, `VMAX`, `TMAX`; refresh (`CC`) answers with feedback; save (`AA`) answers nothing |
 | Packing | 16 bits of position, 12 of velocity, torque and gains, clamped to their ranges, as the real motors pack them |
 
 Not yet, or not at all:
@@ -230,11 +235,38 @@ Not yet, or not at all:
   and position-force (`id + 0x300`) frames are ignored, with a note. Writing another mode to
   `CTRL_MODE` is refused: the answer says it is still MIT mode (1).
 - **Ids can't be rewritten** over the bus; they're the robot file's.
-- **Registers other than the six above** get no answer, with a note. That
+- **Registers other than the seven above** get no answer, with a note. That
   includes `TIMEOUT` (9): its units aren't in the sources below, so the
   timeout is set in the robot file instead.
-- **Temperatures** are always 25 °C. Nothing overheats; faults come from a
-  scenario, and only communication loss happens on its own.
+- **No power supply.** Overvoltage, undervoltage, overcurrent and overload
+  are never reported.
+
+## Heat
+
+Each motor's coil and drive heat as it gives torque, and cool towards the
+air (25 °C). Heat goes as the current squared, and the current as the
+torque, so each heads for `25 °C + rise × (torque / rated torque)²`, as fast
+as its time constant:
+
+| | rise at rated torque | time constant |
+|---|---|---|
+| coil | 85 °C (110 °C, held forever) | 120 s |
+| drive | 45 °C (70 °C) | 20 s |
+
+Damiao's datasheets give a motor's rated and peak torque, not how fast or
+how far it heats, so these are **assumptions**, chosen to agree with what
+they do give: rated torque, held forever, stays under the threshold; peak
+torque (three times rated) trips the drive within about five seconds. The
+threshold is the motor's `OT_Value` register, 80 to 200 °C (openarm_can's
+register table); what Damiao's motors leave the factory with isn't
+published, so drydock's start at 120 °C. Past it, while enabled, a motor
+stops with status `B` (drive) or `C` (coil), gives no torque, and says so
+until the error is cleared; cleared, it runs again until it's past again.
+
+A motor's rated torque defaults to a third of its peak. Where resellers
+publish ratings, that's within a tenth of them: about 3 N m for a DM-J4310,
+9 for a DM-J4340, 20 for a DM-J8009. `rated_torque` in the robot file sets
+it.
 
 ## Time
 

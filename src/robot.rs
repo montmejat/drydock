@@ -159,6 +159,11 @@ pub struct MotorSpec {
     /// N m: by default, the model's TMAX.
     #[serde(default)]
     pub peak_torque: Option<f64>,
+    /// What it may give for as long as it likes, N m: what sets how hot it
+    /// gets (`thermal.rs`). By default, a third of its peak torque, which
+    /// agrees with Damiao's ratings within a tenth where they're published.
+    #[serde(default)]
+    pub rated_torque: Option<f64>,
     /// Off by default, as Damiao's motors leave the factory.
     #[serde(default)]
     pub timeout_ms: Option<f64>,
@@ -190,6 +195,10 @@ impl MotorSpec {
 
     pub fn peak_torque(&self) -> f64 {
         self.peak_torque.unwrap_or(self.limits().t as f64)
+    }
+
+    pub fn rated_torque(&self) -> f64 {
+        self.rated_torque.unwrap_or(self.peak_torque() / 3.0)
     }
 }
 
@@ -260,8 +269,8 @@ fn check_bus(bus: &BusSpec) -> Result<(), String> {
             }
             ids.push((id, &m.joint));
         }
-        if [m.peak_torque, m.timeout_ms].into_iter().flatten().any(|x| x.is_nan() || x <= 0.0) {
-            return Err(format!("{}: peak_torque and timeout_ms are above zero", m.joint));
+        if [m.peak_torque, m.rated_torque, m.timeout_ms].into_iter().flatten().any(|x| x.is_nan() || x <= 0.0) {
+            return Err(format!("{}: peak_torque, rated_torque and timeout_ms are above zero", m.joint));
         }
         if [m.limits.p, m.limits.v, m.limits.t].into_iter().flatten().any(|x| x.is_nan() || x <= 0.0) {
             return Err(format!("{}: limits are above zero", m.joint));

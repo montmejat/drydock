@@ -18,7 +18,7 @@ own software, unchanged.
 |---|---|
 | **Real**: the same code as on the robot | the bus master and its driver library, its socket calls, its threads and timing on the host, its handling of every answer |
 | **Modelled**: real code paths, simulated input | each motor's firmware (answers, states, registers, timeout, MIT control law), its torque limit and transmission, its encoder's errors, its faults (from a scenario), the bus's timing (frame lengths, arbitration), the robot's mechanics (MuJoCo, from the robot's own MJCF) |
-| **Absent**: not exercised at all | the bus's electrical faults (error frames, bus-off), the motors' other modes, thermals, power |
+| **Absent**: not exercised at all | the bus's electrical faults (error frames, bus-off), the motors' other modes, power |
 
 Most simulators draw the line higher: the robot's software talks to the
 simulator through an adapter of its own (a Python API, a TCP protocol), and
@@ -53,6 +53,7 @@ out.
 | `damiao::motor` | one motor's firmware: disabled, enabled or in error; its command; its registers; its timeout; the torque its law asks for | what limits that torque, joints, MuJoCo: it's handed `(t, θ, θ̇)` and the torque it got |
 | `damiao::bus` | the motors on one bus: whose a frame is, CAN FD or classic, notes on what's ignored | timing, physics |
 | `drivetrain` | what a motor can give (peak torque), how its turning moves its joint (transmission), what it senses of it | protocols |
+| `thermal` | how hot a motor's coil and drive get, from the torque it gives | when the motor trips: its firmware's |
 | `effects` | an encoder's errors (delay, bias, drift, noise, counts), faults (dead, weak, frozen, noisy), a seeded generator | motors, protocols |
 | `scenario` | when faults start and end: at set times, or at random from a seed | what a fault does |
 | `world`, `shim/world.c` | MuJoCo: joints by name, their state, forces on them, stepping, keyframes, silencing the scene's own actuators | motors |
@@ -202,6 +203,15 @@ its eight commands at once sends all eight before the first answer (at
 higher ids) goes. That is what a CAN controller with several transmit
 buffers does; one that sends a frame at a time, with gaps between, would let
 answers in between.
+
+**Heat is derived, and the assumptions are named.** Damiao publishes rated
+and peak torques, not thermal resistances or capacities, so the heat model is
+the simplest that respects what is published: each of the coil and the
+drive heads for a temperature that grows with the square of the torque over
+the rated torque, at its own pace, and the firmware trips at its `OT_Value`.
+The rises and time constants are chosen so that rated torque runs forever
+and peak torque trips the drive in seconds; the README lists them as
+assumptions. A better source replaces them; nothing else changes.
 
 **Faults are a scenario's, and say nothing.** A scenario file, beside the
 robot file, says when motors break: at set times, to check a reaction, or

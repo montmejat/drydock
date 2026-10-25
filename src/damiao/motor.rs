@@ -1,14 +1,15 @@
 //! One Damiao motor in MIT mode, as its firmware behaves: what it does with
 //! the frames it gets, and the torque its control law asks for. It knows
 //! nothing of MuJoCo, nor of what limits the torque it gets
-//! (`drivetrain.rs`): it is handed its own angle and velocity, the time, and
-//! the torque it was given.
+//! (`drivetrain.rs`): it is handed its own angle and velocity, the time, the
+//! torque it was given, and how hot it is (`thermal.rs`).
 
 use crate::can::Frame;
 use crate::damiao::{reg, status, Feedback, Limits, Mit, Register, RegisterReply, Special};
 
-/// What drydock reports for both temperatures: it has no thermal model.
-pub const TEMPERATURE: u8 = 25;
+/// The over-temperature threshold a motor starts with, °C. Damiao doesn't
+/// say what theirs leave the factory with; assumed.
+pub const OVER_TEMPERATURE: f32 = 120.0;
 
 #[derive(Debug, Clone)]
 pub struct Motor {
@@ -32,6 +33,11 @@ pub struct Motor {
     zero: f64,
     /// The torque it got on the last step, which it reports.
     torque: f64,
+    /// OT_VALUE, °C.
+    over_temperature: f32,
+    /// Its drive's and its coil's temperatures, °C, which it reports.
+    drive_c: f64,
+    coil_c: f64,
 }
 
 impl Motor {
@@ -47,6 +53,9 @@ impl Motor {
             heard: 0.0,
             zero: 0.0,
             torque: 0.0,
+            over_temperature: OVER_TEMPERATURE,
+            drive_c: crate::thermal::AMBIENT,
+            coil_c: crate::thermal::AMBIENT,
         }
     }
 
@@ -118,6 +127,7 @@ impl Motor {
     /// A register's value, if simulated.
     pub fn register(&self, rid: u8) -> Option<[u8; 4]> {
         Some(match rid {
+            reg::OT_VALUE => self.over_temperature.to_le_bytes(),
             reg::MST_ID => (self.master_id as u32).to_le_bytes(),
             reg::ESC_ID => (self.id as u32).to_le_bytes(),
             reg::CTRL_MODE => reg::MIT_MODE.to_le_bytes(),
@@ -128,15 +138,16 @@ impl Motor {
         })
     }
 
-    /// The ranges are writable. The ids aren't, since the bus would have to
-    /// change under drydock; nor is the mode, since only MIT mode is
-    /// simulated.
+    /// The ranges, and the over-temperature threshold within 80 to 200 °C,
+    /// are writable. The ids aren't, since the bus would have to change
+    /// under drydock; nor is the mode, since only MIT mode is simulated.
     fn write(&mut self, rid: u8, value: [u8; 4]) {
         let x = f32::from_le_bytes(value);
         if !(x.is_finite() && x > 0.0) {
             return;
         }
         match rid {
+            reg::OT_VALUE if (80.0..200.0).contains(&x) => self.over_temperature = x,
             reg::PMAX => self.limits.p = x,
             reg::VMAX => self.limits.v = x,
             reg::TMAX => self.limits.t = x,
@@ -164,6 +175,23 @@ impl Motor {
         self.torque = torque;
     }
 
+    /// How hot its drive and its coil are, °C. Past its threshold while
+    /// enabled, it stops with an over-temperature error, the drive's first,
+    /// until cleared. There's no hysteresis in Damiao's sources, so none
+    /// here: cleared and enabled, it runs until it's past again.
+    pub fn temperatures(&mut self, drive: f64, coil: f64) {
+        (self.drive_c, self.coil_c) = (drive, coil);
+        if self.status != status::ENABLED {
+            return;
+        }
+        let limit = self.over_temperature as f64;
+        if drive >= limit {
+            self.status = status::MOS_OVERTEMPERATURE;
+        } else if coil >= limit {
+            self.status = status::COIL_OVERTEMPERATURE;
+        }
+    }
+
     fn feedback(&self, q: f64, v: f64) -> Frame {
         let f = Feedback {
             id: (self.id & 0xF) as u8,
@@ -171,8 +199,8 @@ impl Motor {
             p: (q - self.zero) as f32,
             v: v as f32,
             t: self.torque as f32,
-            t_mos: TEMPERATURE,
-            t_rotor: TEMPERATURE,
+            t_mos: self.drive_c.round().clamp(0.0, 255.0) as u8,
+            t_rotor: self.coil_c.round().clamp(0.0, 255.0) as u8,
         };
         Frame::new(self.master_id, f.encode(self.limits))
     }
