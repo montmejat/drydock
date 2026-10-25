@@ -7,6 +7,7 @@
 //! - `run`: the clock, real time or lockstep, over every bus;
 //! - `damiao`: Damiao's protocol, one motor's firmware, the motors on a bus;
 //! - `drivetrain`: what limits a motor's torque, and how it moves its joint;
+//! - `thermal`: how hot a motor's coil and drive get;
 //! - `effects`: an imperfect encoder, and how a motor breaks;
 //! - `scenario`: when motors break, at set times or at random;
 //! - `world`: MuJoCo;
@@ -21,4 +22,5 @@ pub mod effects;
 pub mod robot;
 pub mod run;
 pub mod scenario;
+pub mod thermal;
 pub mod world;

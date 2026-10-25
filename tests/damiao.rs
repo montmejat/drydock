@@ -77,6 +77,31 @@ fn mit_values_outside_the_ranges_are_clamped() {
     assert_eq!((m.kp, m.kd), (500.0, 0.0));
 }
 
+/// `seconds` of physics, the motor sent `frame` each step; its last answer.
+fn hold(dock: &mut Drydock, frame: [u8; 8], seconds: f64, limits: Limits) -> Feedback {
+    let mut last = None;
+    for _ in 0..(seconds / dock.timestep()).round() as usize {
+        last = send(dock, ID, frame);
+        dock.step();
+    }
+    feedback(last.unwrap(), limits)
+}
+
+fn torque(t: f32, limits: Limits) -> [u8; 8] {
+    Mit { p: 0.0, v: 0.0, kp: 0.0, kd: 0.0, t }.encode(limits)
+}
+
+#[test]
+fn mit_feedback_reports_temperatures_that_rise_with_torque() {
+    let (mut dock, limits) = slide();
+    let cold = feedback(send(&mut dock, ID, Special::Enable.encode()).unwrap(), limits);
+    assert_eq!((cold.t_mos, cold.t_rotor), (25, 25));
+    // Its rated torque, a third of its peak: warmer, and it stays enabled.
+    let warm = hold(&mut dock, torque(limits.t / 3.0, limits), 10.0, limits);
+    assert_eq!(warm.status, status::ENABLED);
+    assert!(warm.t_mos > 40 && warm.t_rotor > 30, "{warm:?}");
+}
+
 /* ── Special frames ── */
 
 #[test]
@@ -133,6 +158,17 @@ fn special_clear_error_after_communication_lost() {
 }
 
 /* ── Registers, through 0x7FF ── */
+
+#[test]
+fn register_reads_and_writes_of_the_over_temperature_threshold() {
+    let (mut dock, _) = slide();
+    assert_eq!(f32::from_le_bytes(read(&mut dock, reg::OT_VALUE)), 120.0);
+    send(&mut dock, 0x7FF, Register::Write { motor: ID, rid: reg::OT_VALUE, value: 150.0f32.to_le_bytes() }.encode());
+    assert_eq!(f32::from_le_bytes(read(&mut dock, reg::OT_VALUE)), 150.0);
+    // Out of 80 to 200 °C: refused, and the answer says what it kept.
+    send(&mut dock, 0x7FF, Register::Write { motor: ID, rid: reg::OT_VALUE, value: 50.0f32.to_le_bytes() }.encode());
+    assert_eq!(f32::from_le_bytes(read(&mut dock, reg::OT_VALUE)), 150.0);
+}
 
 #[test]
 fn register_reads_of_the_ranges_ids_and_mode() {
@@ -218,12 +254,33 @@ fn register_writes_of_the_ids() {}
 fn register_writes_of_the_timeout() {}
 
 #[test]
-#[ignore = "not simulated: registers other than MST_ID, ESC_ID, CTRL_MODE, PMAX, VMAX and TMAX get no answer, with a note"]
+#[ignore = "not simulated: registers other than OT_Value, MST_ID, ESC_ID, CTRL_MODE, PMAX, VMAX and TMAX get no answer, with a note"]
 fn register_reads_of_the_other_registers() {}
 
 #[test]
-#[ignore = "not simulated: temperatures stay at 25 °C; overvoltage, undervoltage, overcurrent, overheating and overload are never reported"]
-fn status_electrical_and_thermal_faults() {}
+fn status_overheating_stops_the_motor_until_it_cools_and_is_cleared() {
+    let (mut dock, limits) = slide();
+    send(&mut dock, ID, Special::Enable.encode());
+    // At its peak torque, three times its rating, the drive overheats first.
+    let hot = hold(&mut dock, torque(limits.t, limits), 8.0, limits);
+    assert_eq!(hot.status, status::MOS_OVERTEMPERATURE, "{hot:?}");
+    // It tripped at 120 °C a few seconds in, and has been cooling since.
+    assert!(hot.t_mos > 100, "{hot:?}");
+    let f = hold(&mut dock, torque(limits.t, limits), 0.1, limits);
+    assert!(f.t.abs() <= 2.0 * limits.t / 4095.0, "no torque while in error: {f:?}");
+    // Cleared, once below its threshold, it runs again; pushed as hard, it
+    // trips again, sooner, as it hasn't cooled all the way.
+    send(&mut dock, ID, Special::ClearError.encode());
+    send(&mut dock, ID, Special::Enable.encode());
+    let again = hold(&mut dock, torque(limits.t, limits), 0.5, limits);
+    assert_eq!(again.status, status::ENABLED, "{again:?}");
+    let again = hold(&mut dock, torque(limits.t, limits), 3.0, limits);
+    assert_eq!(again.status, status::MOS_OVERTEMPERATURE, "{again:?}");
+}
+
+#[test]
+#[ignore = "not simulated: no power supply, so overvoltage, undervoltage, overcurrent and overload are never reported"]
+fn status_electrical_faults() {}
 
 #[test]
 #[ignore = "not simulated: the bus's bit rates are the robot file's"]

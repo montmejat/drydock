@@ -53,6 +53,9 @@ pub enum Breakdown {
     Freeze,
     /// Its encoder's noise grows twentyfold.
     Noisy,
+    /// It has lost most of its cooling (a blocked heatsink, a dead fan): it
+    /// heats five times as fast, for the same torque.
+    Overheat,
 }
 
 impl Breakdown {
@@ -62,6 +65,7 @@ impl Breakdown {
             Breakdown::Weak => "weak",
             Breakdown::Freeze => "freeze",
             Breakdown::Noisy => "noisy",
+            Breakdown::Overheat => "overheat",
         }
     }
 }

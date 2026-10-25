@@ -1,12 +1,13 @@
 //! Between a motor's firmware and its joint, the physical part: what limits
 //! the torque the motor gives (the actuator), how the motor's turning moves
-//! its joint (the transmission), what its encoder reads of it, and how it
-//! breaks (`effects`). A motor asks for a torque; this says what reaches the
+//! its joint (the transmission), what its encoder reads of it, how hot it
+//! gets (`thermal`), and how it breaks (`effects`). A motor asks for a torque; this says what reaches the
 //! joint, and what the motor senses of it.
 
 use serde::Deserialize;
 
 use crate::effects::{self, Breakdown, Encoder};
+use crate::thermal::{Thermal, LOST_COOLING};
 use crate::world::Joint;
 
 /// What a motor can physically give.
@@ -59,6 +60,7 @@ pub struct Drivetrain {
     pub actuator: Actuator,
     pub transmission: Transmission,
     pub encoder: Encoder,
+    pub thermal: Thermal,
     /// What's broken, each until when (or for good), latest last: the
     /// latest is what shows.
     pub faults: Vec<(Breakdown, Option<f64>)>,
@@ -77,6 +79,12 @@ impl Drivetrain {
     /// within its peak, unless it has broken.
     pub fn torque(&self, asked: f64) -> f64 {
         effects::torque(self.actuator.torque(asked), self.breakdown())
+    }
+
+    /// `dt` seconds of giving `torque`: how hot it gets.
+    pub fn heat(&mut self, dt: f64, torque: f64) {
+        let heating = if self.faults.iter().any(|&(f, _)| f == Breakdown::Overheat) { LOST_COOLING } else { 1.0 };
+        self.thermal.step(dt, torque, heating);
     }
 
     /// What shows of what's broken: the latest fault.

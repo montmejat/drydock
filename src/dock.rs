@@ -10,6 +10,7 @@ use crate::drivetrain::{Actuator, Drivetrain};
 use crate::effects::Encoder;
 use crate::robot::Robot;
 use crate::scenario::{Change, Happening, Scenario};
+use crate::thermal::Thermal;
 use crate::world::World;
 
 pub struct Drydock {
@@ -53,6 +54,7 @@ impl Drydock {
                     actuator,
                     transmission: m.transmission,
                     encoder,
+                    thermal: Thermal::new(m.rated_torque()),
                     faults: Vec::new(),
                 });
             }
@@ -147,6 +149,7 @@ impl Drydock {
     /// One step of physics, under the torques the motors give now.
     pub fn step(&mut self) {
         let now = self.world.time();
+        let dt = self.world.timestep();
         self.faults(now);
         for b in &mut self.buses {
             for (i, d) in b.drivetrains.iter_mut().enumerate() {
@@ -155,6 +158,8 @@ impl Drydock {
                 let motor = b.motors.motor_mut(i);
                 let torque = d.torque(motor.law(now, theta, omega));
                 motor.applied(torque);
+                d.heat(dt, torque);
+                motor.temperatures(d.thermal.drive, d.thermal.coil);
                 self.world.set_force(d.joint, d.transmission.to_joint(torque));
             }
         }

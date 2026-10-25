@@ -43,6 +43,9 @@ pub mod status {
 
 /// The registers drydock simulates, by number.
 pub mod reg {
+    /// The temperature, °C, at which the motor stops with an over-temperature
+    /// error: 80 to 200 (openarm_can's register table).
+    pub const OT_VALUE: u8 = 2;
     pub const MST_ID: u8 = 7;
     pub const ESC_ID: u8 = 8;
     pub const TIMEOUT: u8 = 9;
