@@ -52,6 +52,10 @@ out.
 | `damiao::protocol` | Damiao's frames: commands, feedback, special frames, registers, packing, the motors' factory ranges | anything but bytes ↔ values |
 | `damiao::motor` | one motor's firmware: disabled, enabled or in error; its command; its registers; its timeout; the torque its law asks for | what limits that torque, joints, MuJoCo: it's handed `(t, θ, θ̇)` and the torque it got |
 | `damiao::bus` | the motors on one bus: whose a frame is, CAN FD or classic, notes on what's ignored | timing, physics |
+| `serial` | a serial port as a pseudo-terminal, linked where the robot file says; `serial::timing`, bytes on a half-duplex line | protocols |
+| `dynamixel::protocol` | Protocol 2.0's packets: framing, stuffing, CRC, every instruction, status and fast replies | anything but bytes ↔ values |
+| `dynamixel::xl330` | one XL330's firmware: its control table, what reads and writes do, BAM's position loop, motor and friction | joints, MuJoCo: it's handed `(t, θ, θ̇)`, the voltage and the load |
+| `dynamixel::bus` | the servos on one line: who an instruction is for, who answers, in what order, after what delay | timing, physics |
 | `drivetrain` | what a motor can give (peak torque), how its turning moves its joint (transmission), what it senses of it | protocols |
 | `thermal` | how hot a motor's coil and drive get, from the torque it gives | when the motor trips: its firmware's |
 | `power` | the supply: what the motors draw and give back, the bus's voltage | when the motor trips: its firmware's |
@@ -62,12 +66,15 @@ out.
 | `robot` | the robot file | |
 
 `damiao::protocol` serves both sides: the `wave` example uses it to talk to
-drydock as a master would.
+drydock as a master would. `dynamixel::protocol` does the same in
+`tests/dynamixel.rs`.
 
-A second protocol (Dynamixel, for Microduck) would be a sibling of `damiao`
-(its frames, its devices, which device a packet is for) on a sibling of
-`can` (a pseudo-terminal); `drivetrain`, `world`, `dock` and `run` would
-serve it as they are, with a sensor next to the drivetrain for its IMU.
+Dynamixel is a sibling of `damiao` (its packets, its servos, who a packet is
+for) on a sibling of `can` (a pseudo-terminal); `drivetrain`, `world`, `dock`
+and `run` serve both. A servo differs in one way: its torque isn't asked of
+an actuator that limits it, but comes out of BAM's motor model, which sets
+the joint's friction too, each step, from the load MuJoCo says the joint
+carries.
 
 ### Layout
 
@@ -76,6 +83,8 @@ serve it as they are, with a sensor next to the drivetrain for its IMU.
 | `src/can/` | frames and SocketCAN; `timing.rs`, how long frames take and in what order |
 | `src/run.rs` | the clock: real time or lockstep, over every bus |
 | `src/damiao/` | `protocol.rs`, the frames; `motor.rs`, one motor's firmware; `bus.rs`, the motors on one bus |
+| `src/serial/`, `src/poll.rs` | serial ports as ptys, and how long bytes take; waiting on sockets and ports at once |
+| `src/dynamixel/` | `protocol.rs`, the packets; `xl330.rs`, one servo's firmware; `bus.rs`, the servos on one line |
 | `src/drivetrain.rs` | what limits a motor's torque, how it moves its joint, what it senses |
 | `src/effects.rs` | an imperfect encoder, and how a motor breaks |
 | `src/thermal.rs`, `src/power.rs` | how hot a motor gets; the supply it runs on |
@@ -85,6 +94,7 @@ serve it as they are, with a sensor next to the drivetrain for its IMU.
 | `src/robot.rs` | the robot file |
 | `examples/arm` | a two-joint arm; `examples/wave.rs`, a bus master for it |
 | `examples/openarm` | OpenArm v1; `hold.cpp`, a bus master on `openarm_can`; scenarios (`*.scenario.yml`) |
+| `examples/xl330` | one XL330 on a bench; `rustypot.rs`, a bus master on Pollen's library |
 
 ## 3. A frame's way through, in real time
 

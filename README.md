@@ -1,15 +1,21 @@
 # drydock
 
-A robot's motors on a virtual CAN bus, their physics simulated in MuJoCo.
+A robot's motors on virtual buses, CAN or serial, their physics simulated
+in MuJoCo.
 
 ## What it supports
 
-drydock speaks one protocol, and tries to speak it completely: **Damiao's
-motors** (DM-J4310, DM-J4340, DM-J8009 and the rest), in MIT mode and their
-three other modes, as on OpenArm and many other arms and legs.
+drydock speaks two protocols, and tries to speak each completely:
 
-Every feature is shown by a test in [`tests/damiao.rs`](tests/damiao.rs),
-and so is every gap: CI turns them into a table. The table, and what's not
+- **Damiao's motors** on CAN (DM-J4310, DM-J4340, DM-J8009 and the rest), in
+  MIT mode and their three other modes, as on OpenArm and many other arms
+  and legs.
+- **Dynamixel servos** on a serial line: Protocol 2.0 and the XL330, as on
+  Pollen's Microduck, after BAM's measured model of it.
+
+Every feature is shown by a test in [`tests/damiao.rs`](tests/damiao.rs) and
+[`tests/dynamixel.rs`](tests/dynamixel.rs), and so is every gap: CI turns
+them into tables. The table, and what's not
 there yet, is in [docs/simulation.md](docs/simulation.md).
 
 ## How it connects
@@ -25,6 +31,10 @@ your software ──► SocketCAN (vcan0) ──► drydock ──────�
 openarm_can,      the frames it would   each motor's firmware,   the robot's
 keel, …           send to the motors    answering as the motor   physics
 ```
+
+On a serial bus, drydock makes a pseudo-terminal and links it where the
+robot file says (`/tmp/drydock-xl330`, say): open it instead of
+`/dev/ttyS2`. No root needed.
 
 ## Run it
 
@@ -76,7 +86,14 @@ t =   1.0 s  shoulder: +0.538 rad -1.57 N m [1]  elbow: +0.010 rad -0.32 N m [1]
 t =   1.5 s  shoulder: +0.396 rad -1.69 N m [1]  elbow: -0.494 rad -0.26 N m [1]
 ```
 
-`cargo test` runs the protocol's and the motor's unit tests, and the arm in
+Or one Dynamixel XL330 on a serial port, which Pollen's servo library
+(`examples/xl330/rustypot.rs`) drives as it drives the real one:
+
+```sh
+drydock examples/xl330/robot.yml
+```
+
+`cargo test` runs the protocols' and the motors' unit tests, and the arm in
 MuJoCo frame by frame without a bus.
 
 ## Docs

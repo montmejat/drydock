@@ -67,3 +67,30 @@ A motor:
   together. The joint is at `offset + ratio θ` when the motor is at `θ`, and
   a motor torque `τ` puts `τ / ratio` on the joint. A gripper whose rotary
   motor slides its fingers has a ratio in metres per radian.
+
+## Serial buses
+
+Dynamixel servos sit on serial buses, under `serial`, beside or instead of
+`buses`:
+
+```yaml
+serial:
+  - port: /tmp/drydock-xl330  # where drydock links the bus, for the robot's software to open
+    baud: 1000000             # optional: 1 Mbit/s by default
+    motors:
+      - { joint: horn, model: XL330-M288, id: 1 }
+power: { volts: 5.0, battery: true }
+```
+
+- `port`: drydock makes a pseudo-terminal and links it here, replacing a
+  link left from a run before; anything else there is an error.
+- `baud`: one of the servos' rates: 9600, 57 600 or 115 200 bit/s, or 1, 2,
+  3 or 4 Mbit/s. Their Baud Rate register starts at it.
+- A servo: `joint`, `model` (`XL330-M288`), `id` (0 to 252), and, as a
+  motor, `transmission` and `encoder`. It starts as it leaves the factory,
+  at that id and rate: the robot's software sets the rest, as on the real
+  robot.
+- `power` must say what runs the servos: an XL330 takes 3.7 to 6 V, or a 2S
+  battery with its input-voltage shutdown turned off, as the Microduck has.
+  `battery: true` makes the supply a battery, which sags behind its `ohms`
+  as the motors draw and takes back what they give.

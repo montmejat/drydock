@@ -89,3 +89,24 @@ double dd_q(const dd_world* w, int qpos) { return w->d->qpos[qpos]; }
 double dd_v(const dd_world* w, int dof) { return w->d->qvel[dof]; }
 void dd_set_force(dd_world* w, int dof, double f) { w->d->qfrc_applied[dof] = f; }
 void dd_step(dd_world* w) { mj_step(w->m, w->d); }
+
+// The torque on a joint's degree of freedom from everything but its motor
+// and its own friction: gravity and the other bodies' motion (the bias, with
+// its sign turned), contacts and limits (the constraints), less the force of
+// the dof's own friction constraint. Each friction row of a dof is a unit
+// row on it, so its force is its share of `qfrc_constraint`. As of the last
+// step.
+double dd_load_torque(const dd_world* w, int dof) {
+  double friction = 0;
+  for (int i = 0; i < w->d->nefc; i++) {
+    if (w->d->efc_type[i] == mjCNSTR_FRICTION_DOF && w->d->efc_id[i] == dof) friction += w->d->efc_force[i];
+  }
+  return -w->d->qfrc_bias[dof] + w->d->qfrc_constraint[dof] - friction;
+}
+
+// A dof's dry friction (N m, or N) and viscous damping (N m s/rad, or N s/m),
+// from the next step on.
+void dd_set_friction(dd_world* w, int dof, double frictionloss, double damping) {
+  w->m->dof_frictionloss[dof] = frictionloss;
+  w->m->dof_damping[dof] = damping;
+}

@@ -28,6 +28,8 @@ extern "C" {
     fn dd_q(w: *const Raw, qpos: c_int) -> c_double;
     fn dd_v(w: *const Raw, dof: c_int) -> c_double;
     fn dd_set_force(w: *mut Raw, dof: c_int, f: c_double);
+    fn dd_load_torque(w: *const Raw, dof: c_int) -> c_double;
+    fn dd_set_friction(w: *mut Raw, dof: c_int, frictionloss: c_double, damping: c_double);
     fn dd_step(w: *mut Raw);
 }
 
@@ -120,6 +122,19 @@ impl World {
     pub fn set_force(&mut self, joint: Joint, f: f64) {
         // SAFETY: as above.
         unsafe { dd_set_force(self.raw, joint.dof, f) }
+    }
+
+    /// What loads a joint, besides its motor and its own friction: gravity,
+    /// the other bodies' motion, contacts and limits, as of the last step.
+    pub fn load_torque(&self, joint: Joint) -> f64 {
+        // SAFETY: as above.
+        unsafe { dd_load_torque(self.raw, joint.dof) }
+    }
+
+    /// A joint's dry friction and viscous damping, from the next step on.
+    pub fn set_friction(&mut self, joint: Joint, frictionloss: f64, damping: f64) {
+        // SAFETY: as above.
+        unsafe { dd_set_friction(self.raw, joint.dof, frictionloss, damping) }
     }
 
     pub fn step(&mut self) {

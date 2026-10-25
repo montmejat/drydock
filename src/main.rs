@@ -3,8 +3,9 @@ use std::process::ExitCode;
 use drydock::can::Socket;
 use drydock::dock::Drydock;
 use drydock::robot::Robot;
-use drydock::run::{self, BusTrace, Line};
+use drydock::run::{self, BusTrace, Line, SerialLine};
 use drydock::scenario::Scenario;
+use drydock::serial::Pty;
 
 const USAGE: &str = "\
 drydock: a robot's motors on virtual CAN buses, simulated in MuJoCo
@@ -62,8 +63,7 @@ fn main_() -> Result<(), String> {
     let robot = Robot::load(&path)?;
     let mut dock = Drydock::load(&robot)?;
     if let Some(file) = &scenario {
-        let joints: Vec<String> = robot.motors().map(|(_, m)| m.joint.clone()).collect();
-        dock.set_scenario(Scenario::load(file, &joints)?);
+        dock.set_scenario(Scenario::load(file, &robot.joints())?);
     }
     if let Some(hz) = lockstep {
         run::steps_per_period(dock.timestep(), 1.0 / hz)?;
@@ -84,6 +84,12 @@ fn main_() -> Result<(), String> {
             ));
         }
         lines.push(Line { name: name.clone(), socket, rates: bus.rates(), reply: bus.reply_us / 1e6 });
+    }
+    let mut serial = Vec::new();
+    for bus in &robot.serial {
+        let pty =
+            Pty::open(&bus.port).map_err(|e| format!("can't make the serial port {}: {e}", bus.port.display()))?;
+        serial.push(SerialLine::new(pty, bus.baud));
     }
 
     let pace = match lockstep {
@@ -107,12 +113,18 @@ fn main_() -> Result<(), String> {
             );
         }
     }
+    for (b, bus) in robot.serial.iter().enumerate() {
+        eprintln!("  {} (serial, {} Mbit/s, open it as the robot's serial port)", bus.port.display(), bus.baud / 1e6);
+        for s in dock.servos(b) {
+            eprintln!("    {:<22} id {}", s.joint, s.id());
+        }
+    }
     if let Some(file) = &scenario {
         eprintln!("drydock: what happens to it: {file}");
     }
     let result = match lockstep {
-        Some(hz) => run::lockstep(dock, &lines, 1.0 / hz),
-        None => run::realtime(dock, &lines, trace),
+        Some(hz) => run::lockstep(dock, &lines, &mut serial, 1.0 / hz),
+        None => run::realtime(dock, &lines, &mut serial, trace),
     };
     result.map_err(|e| format!("a bus: {e}"))
 }

@@ -1,8 +1,12 @@
 # What's simulated
 
-Every line below is shown by a test in [`tests/damiao.rs`](../tests/damiao.rs),
-one per feature, and so is every gap: CI turns them into a table on each
+Two protocols, each shown feature by feature by a test, one per feature, and
+so is every gap: CI turns them into tables on each
 [run's summary](https://github.com/montmejat/drydock/actions/workflows/ci.yml).
+Damiao's motors on CAN ([`tests/damiao.rs`](../tests/damiao.rs)) first, then
+Dynamixel servos on a serial line ([`tests/dynamixel.rs`](../tests/dynamixel.rs)).
+
+## Damiao's motors
 
 | | |
 |---|---|
@@ -47,6 +51,45 @@ Not yet, or not at all:
   and a motor at another bit rate is silent: no error frames,
   retransmissions, error counters or bus-off. vcan has no controller to
   report them.
+
+## Dynamixel servos
+
+Dynamixel's Protocol 2.0, on a half-duplex serial line, and the XL330-M288,
+as on Pollen's Microduck. drydock makes the line a pseudo-terminal and links
+it where the robot file says (`port`): the robot's software opens it as its
+serial port, and can't tell it from the real one.
+
+| | |
+|---|---|
+| Packets | header, id, length, instruction, byte stuffing and CRC-16, as the spec lays them out; a packet whose bytes stop for 1.5 ms is dropped, as a servo drops it |
+| Ping, Read, Write, Reg Write and Action, Reboot, Factory Reset | each answered with a status packet after the servo's Return Delay Time, as its Status Return Level allows |
+| Sync Read and Write, Bulk Read and Write | reads answered by each servo in turn, in the order asked |
+| Fast Sync Read, Fast Bulk Read | one packet from every servo asked; one missing breaks it, as on a real bus |
+| The control table | every item of the XL330's, at its address, size and default: writes whole items only, within their ranges, EEPROM only with torque off; goals within the position limits; errors as the spec numbers them |
+| Position control (mode 3) | BAM's model of the XL330: the firmware's P loop gives a duty cycle, within the PWM and current limits, driving a DC motor with back-EMF; friction that grows with the load on the gearbox, as MuJoCo's own, so a held joint sticks |
+| Present values | position (with the homing offset), velocity, current, PWM, input voltage, the realtime tick, moving |
+| Input voltage | outside the voltage limits, with the input-voltage bit in Shutdown, torque goes off and the alert bit is set until a reboot |
+| Baud rate | a servo set to another rate than the bus's neither hears nor answers |
+
+**BAM**, Rhoban's "Better Actuator Models" (Apache-2.0), is a model of the
+XL330 measured on real servos, and the one Pollen trains the Microduck's
+policies against. drydock uses its `m6` parameters: a torque constant of
+0.366 N m/A, 2.81 Ω, and its friction. Its P gain divisor (256, where
+ROBOTIS says 128) is what BAM measured.
+
+Not yet, or not at all:
+
+- **Other operating modes**, the I and D gains, feedforward, profiles, the
+  bus watchdog and indirect addresses are kept as written but change
+  nothing.
+- **No heat**: the temperature reads 25 °C, and overheating, overload and
+  electrical shock are never reported.
+- **An error outside Shutdown isn't flagged.** ROBOTIS doesn't say whether
+  it is; Pollen's runtime sees no alert with the input-voltage bit clear.
+- **Firmware v46**: what drydock's servos report, the oldest that answers
+  Fast Sync Read. Real ones vary.
+- **One sender at a time**: on a real half-duplex line, two senders at once
+  garble each other; drydock queues them.
 
 ## Heat
 
@@ -136,9 +179,18 @@ a frame lines up with the message that carried it:
 {"bus":"vcan0","id":4,"from":"master","fd":true,"data":"90157ff1eb6667ff","ready_ns":180648986126380,"start_ns":180648986283980,"end_ns":180648986335180}
 ```
 
+On a serial line, bytes take ten bits each at its baud rate, one sender at
+a time, and a servo's answer is ready its Return Delay Time after the packet
+it answers is across (500 µs as it leaves the factory: the Microduck sets
+0). With `--trace`, they go there too, a line per crossing:
+
+```
+{"serial":"/tmp/drydock-xl330","from":"master","data":"fffffd0001030001194e","ready_ns":…,"start_ns":…,"end_ns":…}
+```
+
 **In lockstep** (`--lockstep <hz>`), time follows the bus master. Each frame
-is answered at once, and once every motor has had a frame, `1/hz` seconds of
-physics run. A master that sends each motor a command per cycle reads, in
+or packet is answered at once, and once every motor has had one, `1/hz`
+seconds of physics run. A master that sends each motor a command per cycle reads, in
 the answers, what its previous commands did, a cycle later, as on a real bus.
 Unlike a real bus, every run is the same, frame for frame, and runs as fast
 as the master goes; frames take no time. Time stands still while the master is silent, so
@@ -158,3 +210,14 @@ the save's answer, and the voltages and temperatures it recommends
 protecting at. The `TIMEOUT` register's unit, 50 µs, is from the
 [damiao-motor](https://damiao-motor.jia-xie.com/concept/registers/) Python
 driver's documentation; Damiao's own doesn't say.
+
+Dynamixel's packets are from ROBOTIS's
+[Protocol 2.0](https://emanual.robotis.com/docs/en/dxl/protocol2/) e-Manual,
+its worked examples the codec's tests, and the Fast Sync Read reply checked
+against Pollen's [rustypot](https://github.com/pollen-robotics/rustypot) 1.8.0,
+the library the Microduck's runtime uses. The XL330's control table is from
+its [e-Manual](https://emanual.robotis.com/docs/en/dxl/x/xl330-m288/); its
+motor and friction from Rhoban's [BAM](https://github.com/Rhoban/bam)
+(`bam/params/xl330/m6.json`). The Microduck's settings (Return Delay 0,
+Shutdown 52) are from Pollen's
+[runtime](https://github.com/pollen-robotics/microduck).

@@ -7,9 +7,14 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use crate::can::timing::{Crossed, From, Rates, Timeline};
-use crate::can::{wait_any, Socket};
+use std::os::fd::{AsRawFd, RawFd};
+
+use crate::can::Socket;
 use crate::dock::Drydock;
+use crate::dynamixel::{Decoder, Dropped};
+use crate::poll::wait_any;
 use crate::scenario::{Change, Fault, Happening};
+use crate::serial::{timing as serial_timing, Pty};
 
 /// Behind the wall clock by more than this, the simulation stops trying to
 /// catch up, and says so.
@@ -22,6 +27,69 @@ pub struct Line {
     pub rates: Rates,
     /// From a frame reaching a motor to its answer being ready, seconds.
     pub reply: f64,
+}
+
+/// A serial bus as the clock sees it: its pty, its baud rate, and the
+/// packets coming together from its bytes.
+pub struct SerialLine {
+    pub pty: Pty,
+    pub baud: f64,
+    pub decoder: Decoder,
+    /// When the master's last bytes finished crossing.
+    pub last_byte: f64,
+}
+
+/// A servo drops a packet whose bytes stop coming for this long (the
+/// Protocol 2.0 spec's 1.5 ms between bytes).
+const BYTE_GAP: f64 = 1.5e-3;
+
+impl SerialLine {
+    pub fn new(pty: Pty, baud: f64) -> Self {
+        Self { pty, baud, decoder: Decoder::default(), last_byte: 0.0 }
+    }
+
+    pub fn name(&self) -> String {
+        self.pty.link().display().to_string()
+    }
+
+    /// Bytes from the master, crossed by `end`, after the last ones ended
+    /// at `start`'s gap: the packets they complete.
+    fn packets(&mut self, bytes: &[u8], start: f64, end: f64, said: &mut Said) -> Vec<crate::dynamixel::Packet> {
+        if start - self.last_byte > BYTE_GAP {
+            self.decoder = Decoder::default();
+        }
+        self.last_byte = end;
+        self.decoder.push(bytes);
+        let mut packets = Vec::new();
+        while let Some(next) = self.decoder.next_packet() {
+            match next {
+                Ok(packet) => packets.push(packet),
+                Err(dropped) => said.once(format!("{}: a packet dropped: {}", self.name(), describe(dropped))),
+            }
+        }
+        packets
+    }
+}
+
+fn describe(d: Dropped) -> String {
+    match d {
+        Dropped::Crc { id, expected, got } => {
+            format!("to id {id}, its CRC is {got:#06x} where its bytes make {expected:#06x}")
+        }
+        other => format!("{other:?}"),
+    }
+}
+
+/// What has been said once, not to say it again.
+#[derive(Default)]
+struct Said(std::collections::HashSet<String>);
+
+impl Said {
+    fn once(&mut self, message: String) {
+        if self.0.insert(message.clone()) {
+            eprintln!("drydock: {message}");
+        }
+    }
 }
 
 /// Every frame that crosses a bus, as a line of JSON: which bus, its id,
@@ -52,6 +120,24 @@ impl BusTrace {
             r#"{{"bus":"{bus}","id":{},"from":"{from}","fd":{},"data":"{data}","ready_ns":{},"start_ns":{},"end_ns":{}}}"#,
             c.frame.id,
             c.frame.fd,
+            ns(c.ready),
+            ns(c.start),
+            ns(c.end)
+        )
+    }
+
+    /// Bytes that crossed a serial bus, as frames are written: the bus (its
+    /// port), who sent them, their bytes, and when.
+    fn write_serial(&mut self, port: &str, c: &serial_timing::Crossed) -> io::Result<()> {
+        let from = match c.from {
+            serial_timing::From::Master => "master",
+            serial_timing::From::Device => "device",
+        };
+        let data: String = c.bytes.iter().map(|b| format!("{b:02x}")).collect();
+        let ns = |t: f64| (self.base_ns + t * 1e9).round() as u64;
+        writeln!(
+            self.out,
+            r#"{{"serial":"{port}","from":"{from}","data":"{data}","ready_ns":{},"start_ns":{},"end_ns":{}}}"#,
             ns(c.ready),
             ns(c.start),
             ns(c.end)
@@ -132,10 +218,18 @@ fn report(dock: &mut Drydock, trace: Option<&mut BusTrace>, at: f64) -> io::Resu
 /// In real time: a step of physics each timestep of the wall clock. A frame
 /// from a master crosses its bus as long as it would on a real one, after
 /// the frames ahead of it, and reaches the motors when it's across; their
-/// answers cross it in turn, and reach the master when they're across.
+/// answers cross it in turn, and reach the master when they're across. On a
+/// serial bus, bytes do the same, ten bits each at its baud rate, and a
+/// servo answers a packet once it's across, after its return delay.
 ///
-/// With `trace`, every frame that crosses a bus goes there too.
-pub fn realtime(mut dock: Drydock, lines: &[Line], mut trace: Option<BusTrace>) -> io::Result<()> {
+/// With `trace`, every frame and every serial byte that crosses a bus goes
+/// there too.
+pub fn realtime(
+    mut dock: Drydock,
+    lines: &[Line],
+    serial: &mut [SerialLine],
+    mut trace: Option<BusTrace>,
+) -> io::Result<()> {
     // SAFETY: a prctl with no pointers. Waits end within a microsecond of
     // when asked, not the default 50.
     unsafe { libc::prctl(libc::PR_SET_TIMERSLACK, 1u64) };
@@ -144,8 +238,11 @@ pub fn realtime(mut dock: Drydock, lines: &[Line], mut trace: Option<BusTrace>) 
         t.base_ns = monotonic_ns();
     }
     let seconds = || clock.elapsed().as_secs_f64();
-    let sockets: Vec<&Socket> = lines.iter().map(|l| &l.socket).collect();
+    let fds: Vec<RawFd> = lines.iter().map(|l| l.socket.as_raw_fd()).chain(serial.iter().map(|s| s.pty.fd())).collect();
     let mut buses: Vec<Timeline> = lines.iter().map(|l| Timeline::new(l.rates)).collect();
+    let mut wires: Vec<serial_timing::Line> = serial.iter().map(|s| serial_timing::Line::new(s.baud)).collect();
+    let mut said = Said::default();
+    let mut buf = [0u8; 4096];
     let dt = dock.timestep();
     let (mut start, mut steps) = (0.0, 0u64);
     loop {
@@ -173,14 +270,48 @@ pub fn realtime(mut dock: Drydock, lines: &[Line], mut trace: Option<BusTrace>) 
                     }
                 }
             }
+            for (b, wire) in wires.iter_mut().enumerate() {
+                loop {
+                    let arrived = wire.advance(now);
+                    if arrived.is_empty() {
+                        break;
+                    }
+                    for crossed in arrived {
+                        if let Some(t) = &mut trace {
+                            t.write_serial(&serial[b].name(), &crossed)?;
+                        }
+                        match crossed.from {
+                            serial_timing::From::Master => {
+                                let line = &mut serial[b];
+                                for packet in line.packets(&crossed.bytes, crossed.start, crossed.end, &mut said) {
+                                    for reply in dock.deliver_packet(b, &packet) {
+                                        wire.push(reply.bytes, serial_timing::From::Device, crossed.end + reply.after);
+                                    }
+                                }
+                            }
+                            serial_timing::From::Device => serial[b].pty.write(&crossed.bytes)?,
+                        }
+                    }
+                }
+            }
             if now >= due {
                 break;
             }
-            let wake = buses.iter().filter_map(Timeline::next_event).fold(due, f64::min);
-            let ready = wait_any(&sockets, Some(Duration::from_secs_f64((wake - now).max(0.0))))?;
-            for (b, _) in ready.iter().enumerate().filter(|(_, &r)| r) {
-                while let Some(frame) = lines[b].socket.try_recv()? {
-                    buses[b].push(frame, From::Master, seconds());
+            let wake = buses
+                .iter()
+                .filter_map(Timeline::next_event)
+                .chain(wires.iter().filter_map(serial_timing::Line::next_event))
+                .fold(due, f64::min);
+            let ready = wait_any(&fds, Some(Duration::from_secs_f64((wake - now).max(0.0))))?;
+            for (i, _) in ready.iter().enumerate().filter(|(_, &r)| r) {
+                if i < lines.len() {
+                    while let Some(frame) = lines[i].socket.try_recv()? {
+                        buses[i].push(frame, From::Master, seconds());
+                    }
+                } else {
+                    let b = i - lines.len();
+                    let n = serial[b].pty.read(&mut buf)?;
+                    wires[b].push(buf[..n].to_vec(), serial_timing::From::Master, seconds());
                 }
             }
         }
@@ -196,6 +327,11 @@ pub fn realtime(mut dock: Drydock, lines: &[Line], mut trace: Option<BusTrace>) 
                 eprintln!("drydock: {}: {report}", line.name);
             }
         }
+        for (wire, line) in wires.iter_mut().zip(serial.iter()) {
+            if let Some(report) = wire.report(now) {
+                eprintln!("drydock: {}: {report}", line.name());
+            }
+        }
         let late = now - due;
         if late > MAX_LAG.as_secs_f64() {
             eprintln!(
@@ -208,29 +344,48 @@ pub fn realtime(mut dock: Drydock, lines: &[Line], mut trace: Option<BusTrace>) 
     }
 }
 
-/// In lockstep with the bus masters: each frame reaches the motors at once
-/// and is answered at once, with the state as it is, and `period` seconds
-/// of physics run once every motor has had a frame. Time stands still while
-/// the masters don't send, and frames take no time.
+/// In lockstep with the bus masters: each frame or packet reaches the
+/// motors at once and is answered at once, with the state as it is, and
+/// `period` seconds of physics run once every motor has had a frame or a
+/// packet. Time stands still while the masters don't send, and frames and
+/// bytes take no time.
 ///
 /// A master that sends a command to each motor per cycle therefore reads,
 /// in the answers, the state its previous commands brought, a cycle later:
 /// as on a real bus, but the same each run.
-pub fn lockstep(mut dock: Drydock, lines: &[Line], period: f64) -> io::Result<()> {
+pub fn lockstep(mut dock: Drydock, lines: &[Line], serial: &mut [SerialLine], period: f64) -> io::Result<()> {
     let steps = steps_per_period(dock.timestep(), period).map_err(io::Error::other)?;
-    let sockets: Vec<&Socket> = lines.iter().map(|l| &l.socket).collect();
+    let fds: Vec<RawFd> = lines.iter().map(|l| l.socket.as_raw_fd()).chain(serial.iter().map(|s| s.pty.fd())).collect();
+    let mut said = Said::default();
+    let mut buf = [0u8; 4096];
+    let cycle = |dock: &mut Drydock| -> io::Result<()> {
+        if dock.cycle_done() {
+            for _ in 0..steps {
+                dock.step();
+            }
+            report(dock, None, 0.0)?;
+        }
+        Ok(())
+    };
     loop {
-        let ready = wait_any(&sockets, None)?;
-        for (b, _) in ready.iter().enumerate().filter(|(_, &r)| r) {
-            while let Some(frame) = lines[b].socket.try_recv()? {
-                if let Some(answer) = dock.deliver(b, &frame) {
-                    lines[b].socket.send(&answer)?;
-                }
-                if dock.cycle_done() {
-                    for _ in 0..steps {
-                        dock.step();
+        let ready = wait_any(&fds, None)?;
+        for (i, _) in ready.iter().enumerate().filter(|(_, &r)| r) {
+            if i < lines.len() {
+                while let Some(frame) = lines[i].socket.try_recv()? {
+                    if let Some(answer) = dock.deliver(i, &frame) {
+                        lines[i].socket.send(&answer)?;
                     }
-                    report(&mut dock, None, 0.0)?;
+                    cycle(&mut dock)?;
+                }
+            } else {
+                let b = i - lines.len();
+                let n = serial[b].pty.read(&mut buf)?;
+                // No time passes in lockstep: no gap ever drops a packet.
+                for packet in serial[b].packets(&buf[..n], 0.0, 0.0, &mut said) {
+                    for reply in dock.deliver_packet(b, &packet) {
+                        serial[b].pty.write(&reply.bytes)?;
+                    }
+                    cycle(&mut dock)?;
                 }
             }
         }
