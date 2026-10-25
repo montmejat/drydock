@@ -208,6 +208,15 @@ drydock: vcan0: busy 96% of the last 1.0 s; frames waited up to 0.85 ms for it
 (OpenArm on classic CAN at 500 Hz: it just fits.) If the simulation falls
 more than 100 ms behind, it says so and carries on from the present.
 
+`--trace <file>` writes every frame that crosses a bus, one JSON object a
+line: its bus, id, sender, data, and when it was ready, started across and
+arrived, in nanoseconds on `CLOCK_MONOTONIC`, the clock keel's traces use, so
+a frame lines up with the message that carried it:
+
+```
+{"bus":"vcan0","id":4,"from":"master","fd":true,"data":"90157ff1eb6667ff","ready_ns":180648986126380,"start_ns":180648986283980,"end_ns":180648986335180}
+```
+
 **In lockstep** (`--lockstep <hz>`), time follows the bus master. Each frame
 is answered at once, and once every motor has had a frame, `1/hz` seconds of
 physics run. A master that sends each motor a command per cycle reads, in

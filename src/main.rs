@@ -3,18 +3,20 @@ use std::process::ExitCode;
 use drydock::can::Socket;
 use drydock::dock::Drydock;
 use drydock::robot::Robot;
-use drydock::run::{self, Line};
+use drydock::run::{self, BusTrace, Line};
 
 const USAGE: &str = "\
 drydock: a robot's motors on virtual CAN buses, simulated in MuJoCo
 
-usage: drydock <robot.yml> [--lockstep <hz>] [--break <joint>:<fault>]...
+usage: drydock <robot.yml> [--lockstep <hz>] [--break <joint>:<fault>]... [--trace <file>]
 
   --lockstep <hz>          step 1/hz seconds of physics each time every motor
                            has had a frame, instead of following the wall clock
   --break <joint>:<fault>  break the motor on <joint>: dead, weak, freeze or
                            noisy, now or @ seconds into the simulation
-                           (elbow:freeze@10)";
+                           (elbow:freeze@10)
+  --trace <file>           write every frame that crosses a bus, with when it
+                           was ready, started across and arrived (real time)";
 
 fn main() -> ExitCode {
     match main_() {
@@ -28,7 +30,7 @@ fn main() -> ExitCode {
 
 fn main_() -> Result<(), String> {
     let mut args = std::env::args().skip(1);
-    let (mut path, mut lockstep, mut breaks) = (None, None, Vec::new());
+    let (mut path, mut lockstep, mut breaks, mut trace) = (None, None, Vec::new(), None);
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "-h" | "--help" => {
@@ -44,12 +46,17 @@ fn main_() -> Result<(), String> {
                 lockstep = Some(hz);
             }
             "--break" => breaks.push(args.next().ok_or("--break needs joint:fault")?),
+            "--trace" => trace = Some(args.next().ok_or("--trace needs a file")?),
             _ if arg.starts_with('-') => return Err(format!("no option {arg}\n\n{USAGE}")),
             _ if path.is_none() => path = Some(arg),
             _ => return Err(format!("one robot file at a time\n\n{USAGE}")),
         }
     }
     let path = path.ok_or(USAGE)?;
+    if trace.is_some() && lockstep.is_some() {
+        return Err("--trace records how long frames take on the bus, which only happens in real time".into());
+    }
+    let trace = trace.map(|t| BusTrace::create(t.as_ref()).map_err(|e| format!("can't write {t}: {e}"))).transpose()?;
     let mut robot = Robot::load(&path)?;
     for b in &breaks {
         robot.break_motor(b)?;
@@ -103,7 +110,7 @@ fn main_() -> Result<(), String> {
     }
     let result = match lockstep {
         Some(hz) => run::lockstep(dock, &lines, 1.0 / hz),
-        None => run::realtime(dock, &lines),
+        None => run::realtime(dock, &lines, trace),
     };
     result.map_err(|e| format!("a bus: {e}"))
 }

@@ -1,10 +1,12 @@
 //! How time passes: with the wall clock, frames crossing each bus as long
 //! as they would; or with the bus masters' cycles.
 
-use std::io;
+use std::fs::File;
+use std::io::{self, BufWriter, Write};
+use std::path::Path;
 use std::time::{Duration, Instant};
 
-use crate::can::timing::{From, Rates, Timeline};
+use crate::can::timing::{Crossed, From, Rates, Timeline};
 use crate::can::{wait_any, Socket};
 use crate::dock::Drydock;
 
@@ -21,15 +23,72 @@ pub struct Line {
     pub reply: f64,
 }
 
+/// Every frame that crosses a bus, as a line of JSON: which bus, its id,
+/// who sent it, its data, and when it was ready, started across and arrived,
+/// in nanoseconds on the machine's monotonic clock (`CLOCK_MONOTONIC`), the
+/// clock keel's traces use, so the two line up.
+pub struct BusTrace {
+    out: BufWriter<File>,
+    /// The monotonic clock, in ns, when the run's clock read 0.
+    base_ns: f64,
+    flushed: f64,
+}
+
+impl BusTrace {
+    pub fn create(path: &Path) -> io::Result<Self> {
+        Ok(Self { out: BufWriter::new(File::create(path)?), base_ns: 0.0, flushed: 0.0 })
+    }
+
+    fn write(&mut self, bus: &str, c: &Crossed) -> io::Result<()> {
+        let from = match c.from {
+            From::Master => "master",
+            From::Motor => "motor",
+        };
+        let data: String = c.frame.data[..c.frame.len as usize].iter().map(|b| format!("{b:02x}")).collect();
+        let ns = |t: f64| (self.base_ns + t * 1e9).round() as u64;
+        writeln!(
+            self.out,
+            r#"{{"bus":"{bus}","id":{},"from":"{from}","fd":{},"data":"{data}","ready_ns":{},"start_ns":{},"end_ns":{}}}"#,
+            c.frame.id,
+            c.frame.fd,
+            ns(c.ready),
+            ns(c.start),
+            ns(c.end)
+        )
+    }
+
+    /// Out to the file every tenth of a second: drydock ends when it's
+    /// killed, and loses only that much.
+    fn flush_now_and_then(&mut self, now: f64) -> io::Result<()> {
+        if now - self.flushed >= 0.1 {
+            self.flushed = now;
+            self.out.flush()?;
+        }
+        Ok(())
+    }
+}
+
+fn monotonic_ns() -> f64 {
+    let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+    // SAFETY: writes into a local.
+    unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) };
+    ts.tv_sec as f64 * 1e9 + ts.tv_nsec as f64
+}
+
 /// In real time: a step of physics each timestep of the wall clock. A frame
 /// from a master crosses its bus as long as it would on a real one, after
 /// the frames ahead of it, and reaches the motors when it's across; their
 /// answers cross it in turn, and reach the master when they're across.
-pub fn realtime(mut dock: Drydock, lines: &[Line]) -> io::Result<()> {
+///
+/// With `trace`, every frame that crosses a bus goes there too.
+pub fn realtime(mut dock: Drydock, lines: &[Line], mut trace: Option<BusTrace>) -> io::Result<()> {
     // SAFETY: a prctl with no pointers. Waits end within a microsecond of
     // when asked, not the default 50.
     unsafe { libc::prctl(libc::PR_SET_TIMERSLACK, 1u64) };
     let clock = Instant::now();
+    if let Some(t) = &mut trace {
+        t.base_ns = monotonic_ns();
+    }
     let seconds = || clock.elapsed().as_secs_f64();
     let sockets: Vec<&Socket> = lines.iter().map(|l| &l.socket).collect();
     let mut buses: Vec<Timeline> = lines.iter().map(|l| Timeline::new(l.rates)).collect();
@@ -45,14 +104,17 @@ pub fn realtime(mut dock: Drydock, lines: &[Line]) -> io::Result<()> {
                     if arrived.is_empty() {
                         break;
                     }
-                    for (frame, from, at) in arrived {
-                        match from {
+                    for crossed in arrived {
+                        if let Some(t) = &mut trace {
+                            t.write(&lines[b].name, &crossed)?;
+                        }
+                        match crossed.from {
                             From::Master => {
-                                if let Some(answer) = dock.deliver(b, &frame) {
-                                    bus.push(answer, From::Motor, at + lines[b].reply);
+                                if let Some(answer) = dock.deliver(b, &crossed.frame) {
+                                    bus.push(answer, From::Motor, crossed.end + lines[b].reply);
                                 }
                             }
-                            From::Motor => lines[b].socket.send(&frame)?,
+                            From::Motor => lines[b].socket.send(&crossed.frame)?,
                         }
                     }
                 }
@@ -71,6 +133,9 @@ pub fn realtime(mut dock: Drydock, lines: &[Line]) -> io::Result<()> {
         dock.step();
         steps += 1;
         let now = seconds();
+        if let Some(t) = &mut trace {
+            t.flush_now_and_then(now)?;
+        }
         for (bus, line) in buses.iter_mut().zip(lines) {
             if let Some(report) = bus.report(now) {
                 eprintln!("drydock: {}: {report}", line.name);

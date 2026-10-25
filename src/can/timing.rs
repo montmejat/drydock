@@ -165,7 +165,19 @@ struct Pending {
 #[derive(Debug, Clone, Copy)]
 struct OnTheWire {
     pending: Pending,
+    start: f64,
     end: f64,
+}
+
+/// A frame that has crossed the bus: when it was ready to go, when it
+/// started across (it had waited for the bus meanwhile), when it arrived.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Crossed {
+    pub frame: Frame,
+    pub from: From,
+    pub ready: f64,
+    pub start: f64,
+    pub end: f64,
 }
 
 /// One bus: the frames waiting for it, the one crossing it, and how busy
@@ -203,17 +215,17 @@ impl Timeline {
         }
     }
 
-    /// Runs the bus up to `now`, and gives the frames that arrived, with when
-    /// they did. A caller pushing answers to them calls again: they may be
-    /// due already.
-    pub fn advance(&mut self, now: f64) -> Vec<(Frame, From, f64)> {
+    /// Runs the bus up to `now`, and gives the frames that arrived. A caller
+    /// pushing answers to them calls again: they may be due already.
+    pub fn advance(&mut self, now: f64) -> Vec<Crossed> {
         let mut arrived = Vec::new();
         loop {
             if let Some(w) = self.wire {
                 if w.end > now {
                     break;
                 }
-                arrived.push((w.pending.frame, w.pending.from, w.end));
+                let p = w.pending;
+                arrived.push(Crossed { frame: p.frame, from: p.from, ready: p.ready, start: w.start, end: w.end });
                 self.wire = None;
                 continue;
             }
@@ -232,7 +244,7 @@ impl Timeline {
             self.busy += length;
             self.longest_wait = self.longest_wait.max(start - pending.ready);
             self.free = end;
-            self.wire = Some(OnTheWire { pending, end });
+            self.wire = Some(OnTheWire { pending, start, end });
         }
         arrived
     }
@@ -339,9 +351,9 @@ mod tests {
         // The first starts at once, and lands when it's across.
         assert!(bus.advance(0.0).is_empty());
         let landed = bus.advance(bus.next_event().unwrap());
-        assert_eq!(landed[0].0.id, 0x01);
-        bus.push(frame(0x11, [0; 8]), From::Motor, landed[0].2);
-        let order: Vec<u16> = bus.advance(1.0).iter().map(|(f, _, _)| f.id).collect();
+        assert_eq!(landed[0].frame.id, 0x01);
+        bus.push(frame(0x11, [0; 8]), From::Motor, landed[0].end);
+        let order: Vec<u16> = bus.advance(1.0).iter().map(|c| c.frame.id).collect();
         assert_eq!(order, [0x02, 0x11]);
     }
 
@@ -352,7 +364,10 @@ mod tests {
             bus.push(frame(id, [0; 8]), From::Master, 0.0);
         }
         let arrived = bus.advance(1.0);
-        let ends: Vec<f64> = arrived.iter().map(|a| a.2).collect();
+        let ends: Vec<f64> = arrived.iter().map(|a| a.end).collect();
+        // The second waited for the first: ready at 0, started when it was across.
+        assert_eq!(arrived[1].ready, 0.0);
+        assert_eq!(arrived[1].start, arrived[0].end);
         assert!(ends.windows(2).all(|w| w[1] > w[0] + 100e-6), "{ends:?}");
         // Eight classic frames: about a millisecond.
         assert!((0.9e-3..1.1e-3).contains(&ends[7]), "{}", ends[7]);
