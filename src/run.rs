@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use crate::can::timing::{Crossed, From, Rates, Timeline};
 use crate::can::{wait_any, Socket};
 use crate::dock::Drydock;
-use crate::scenario::{Change, Happening};
+use crate::scenario::{Change, Fault, Happening};
 
 /// Behind the wall clock by more than this, the simulation stops trying to
 /// catch up, and says so.
@@ -58,7 +58,8 @@ impl BusTrace {
         )
     }
 
-    /// A fault starting or ending, `at` on the run's clock (seconds).
+    /// A fault starting or ending, `at` on the run's clock (seconds), to
+    /// `joint`'s motor or to the supply.
     fn write_happening(&mut self, joint: &str, h: &Happening, at: f64) -> io::Result<()> {
         let ns = (self.base_ns + at * 1e9).round() as u64;
         let what = match h.what {
@@ -66,12 +67,11 @@ impl BusTrace {
             Change::Breaks { until: None } => r#""breaks""#.into(),
             Change::Recovers => r#""recovers""#.into(),
         };
-        writeln!(
-            self.out,
-            r#"{{"joint":"{joint}","fault":"{}","what":{what},"sim_s":{},"at_ns":{ns}}}"#,
-            h.fault.name(),
-            h.at
-        )
+        let fault = match h.fault {
+            Fault::Motor { breakdown, .. } => format!(r#""joint":"{joint}","fault":"{}""#, breakdown.name()),
+            Fault::Supply { volts } => format!(r#""supply_v":{volts}"#),
+        };
+        writeln!(self.out, r#"{{{fault},"what":{what},"sim_s":{},"at_ns":{ns}}}"#, h.at)
     }
 
     /// Out to the file every tenth of a second: drydock ends when it's
@@ -98,11 +98,28 @@ fn report(dock: &mut Drydock, trace: Option<&mut BusTrace>, at: f64) -> io::Resu
     let happenings = dock.happenings();
     let mut trace = trace;
     for h in &happenings {
-        let joint = dock.joint_name(h.motor).to_owned();
-        let what = match h.what {
-            Change::Breaks { until: Some(u) } => format!("breaks: {}, for {:.3} s", h.fault.name(), u - h.at),
-            Change::Breaks { until: None } => format!("breaks: {}", h.fault.name()),
-            Change::Recovers => format!("recovers from {}", h.fault.name()),
+        let (joint, what) = match h.fault {
+            Fault::Motor { motor, breakdown } => {
+                let name = breakdown.name();
+                let what = match h.what {
+                    Change::Breaks { until: Some(u) } => format!("breaks: {name}, for {:.3} s", u - h.at),
+                    Change::Breaks { until: None } => format!("breaks: {name}"),
+                    Change::Recovers => format!("recovers from {name}"),
+                };
+                (dock.joint_name(motor).to_owned(), what)
+            }
+            Fault::Supply { volts } => {
+                let (to, back) = match volts {
+                    0.0 => ("off".to_string(), "back on".to_string()),
+                    v => (format!("to {v} V"), format!("back from {v} V")),
+                };
+                let what = match h.what {
+                    Change::Breaks { until: Some(u) } => format!("goes {to}, for {:.3} s", u - h.at),
+                    Change::Breaks { until: None } => format!("goes {to}"),
+                    Change::Recovers => format!("is {back}"),
+                };
+                ("the supply".to_owned(), what)
+            }
         };
         eprintln!("drydock: {:.3} s: {joint} {what}", h.at);
         if let Some(t) = trace.as_deref_mut() {

@@ -1,16 +1,17 @@
-//! A simulated robot: the world, and its buses of motors, each motor on its
-//! joint through its drivetrain. Frames that reached the motors in, answers
-//! out, and steps of physics. When frames reach the motors, and how time
+//! A simulated robot: the world, its buses of motors, each motor on its
+//! joint through its drivetrain, and the supply they run on. Frames that
+//! reached the motors in, answers out, and steps of physics. When frames reach the motors, and how time
 //! passes, is up to the caller (`run.rs`).
 
 use crate::can::Frame;
-use crate::damiao::bit_rate;
 use crate::damiao::bus::Motors;
 use crate::damiao::motor::{Motor, Registers};
+use crate::damiao::{bit_rate, status};
 use crate::drivetrain::{Actuator, Drivetrain};
 use crate::effects::{Breakdown, Encoder, Rng};
+use crate::power::{self, Supply};
 use crate::robot::Robot;
-use crate::scenario::{Change, Happening, Scenario};
+use crate::scenario::{Change, Fault, Happening, Scenario};
 use crate::thermal::Thermal;
 use crate::world::World;
 
@@ -22,6 +23,12 @@ pub struct Drydock {
     happened: Vec<Happening>,
     /// Which frames a lossy link loses.
     links: Rng,
+    supply: Supply,
+    /// What it's set to, without faults.
+    volts: f64,
+    /// What a scenario set it to, each until when (or for good); the latest
+    /// wins.
+    supply_faults: Vec<(f64, Option<f64>)>,
 }
 
 /// One bus's motors, and their ways to their joints.
@@ -47,7 +54,7 @@ impl Drydock {
                 if world.release_actuators(joint) > 0 {
                     eprintln!("drydock: the scene's actuator(s) on `{}` are off: its motor drives it", m.joint);
                 }
-                let mut regs = Registers::new(m.id, m.master_id, m.limits());
+                let mut regs = Registers::new(m.id, m.master_id, m.limits(), m.model.volts());
                 (regs.timeout, regs.bit_rate) = (m.timeout(), rate);
                 motors.push(Motor::new(m.joint.clone(), regs));
                 let actuator = Actuator { peak_torque: m.peak_torque() };
@@ -67,7 +74,12 @@ impl Drydock {
             buses.push(Bus { motors: Motors::new(motors, spec.fd, rate), drivetrains, heard });
         }
         let links = Rng::new(robot.seed ^ 0x6c696e6b);
-        Ok(Self { world, buses, scenario: None, happened: Vec::new(), links })
+        let supply = match robot.power {
+            Some(spec) => Supply::bench(spec, robot.motors().count()),
+            None => Supply::ideal(),
+        };
+        let volts = supply.set;
+        Ok(Self { world, buses, scenario: None, happened: Vec::new(), links, supply, volts, supply_faults: Vec::new() })
     }
 
     /// What happens to the robot as time passes.
@@ -102,20 +114,38 @@ impl Drydock {
         let mut motor = 0;
         for b in &mut self.buses {
             for d in &mut b.drivetrains {
-                for fault in d.recover(now) {
-                    self.happened.push(Happening { at: now, motor, fault, what: Change::Recovers });
+                for breakdown in d.recover(now) {
+                    let fault = Fault::Motor { motor, breakdown };
+                    self.happened.push(Happening { at: now, fault, what: Change::Recovers });
                 }
                 motor += 1;
             }
         }
+        let (over, on): (Vec<_>, Vec<_>) =
+            self.supply_faults.drain(..).partition(|&(_, until)| until.is_some_and(|u| u <= now));
+        self.supply_faults = on;
+        for (volts, _) in over {
+            self.happened.push(Happening { at: now, fault: Fault::Supply { volts }, what: Change::Recovers });
+        }
         let due = self.scenario.as_mut().map(|s| s.due(now, count)).unwrap_or_default();
         for h in due {
-            let (b, i) = self.locate(h.motor);
             if let Change::Breaks { until } = h.what {
-                self.buses[b].drivetrains[i].faults.push((h.fault, until));
+                match h.fault {
+                    Fault::Motor { motor, breakdown } => {
+                        let (b, i) = self.locate(motor);
+                        self.buses[b].drivetrains[i].faults.push((breakdown, until));
+                    }
+                    Fault::Supply { volts } => self.supply_faults.push((volts, until)),
+                }
             }
             self.happened.push(Happening { at: now, ..h });
         }
+        self.supply.set = self.supply_faults.last().map_or(self.volts, |&(v, _)| v);
+    }
+
+    /// The bus's voltage at the motors, V.
+    pub fn volts(&self) -> f64 {
+        self.supply.volts()
     }
 
     /// Bus `bus`'s motors, in the robot file's order.
@@ -168,23 +198,37 @@ impl Drydock {
         delivery.answer
     }
 
-    /// One step of physics, under the torques the motors give now.
+    /// One step of physics, under the torques the motors give now, and
+    /// what they draw from the supply for it.
     pub fn step(&mut self) {
         let now = self.world.time();
         let dt = self.world.timestep();
         self.faults(now);
+        let volts = self.supply.volts();
+        let mut watts = 0.0;
         for b in &mut self.buses {
             for (i, d) in b.drivetrains.iter_mut().enumerate() {
                 let (q, v) = self.world.state(d.joint);
                 let (theta, omega) = d.sense(now, q, v);
                 let motor = b.motors.motor_mut(i);
-                let torque = d.torque(motor.law(now, theta, omega));
+                motor.power(volts);
+                let mut asked = motor.law(now, theta, omega);
+                if asked != 0.0 && d.has(Breakdown::Shorted) {
+                    motor.trip(status::OVERCURRENT);
+                    asked = 0.0;
+                }
+                let torque = d.torque(asked);
                 motor.applied(torque);
                 d.heat(dt, torque);
                 motor.temperatures(d.thermal.drive, d.thermal.coil);
+                if motor.on() {
+                    let (_, speed) = d.transmission.to_motor(q, v);
+                    watts += power::draw(torque, speed, d.thermal.rated_torque);
+                }
                 self.world.set_force(d.joint, d.transmission.to_joint(torque));
             }
         }
+        self.supply.step(dt, watts);
         self.world.step();
     }
 

@@ -19,6 +19,7 @@ pub mod damiao;
 pub mod dock;
 pub mod drivetrain;
 pub mod effects;
+pub mod power;
 pub mod robot;
 pub mod run;
 pub mod scenario;

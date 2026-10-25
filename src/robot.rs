@@ -19,6 +19,7 @@
 //!       - { joint: finger, model: DM4310, id: 0x08, master_id: 0x18, transmission: { ratio: 0.042, offset: 0.044 } }
 //!       # An imperfect encoder. When motors break is a scenario's (`scenario.rs`).
 //!       - { joint: wrist, model: DM4310, id: 0x03, master_id: 0x13, encoder: { noise: 0.0005, quantum: 0.0004 } }
+//! power: { volts: 24, ohms: 0.1 }  # optional: a bench supply, through its wires (`power.rs`)
 //! seed: 0                     # optional: for the encoders' noise
 //! ```
 
@@ -32,6 +33,7 @@ use crate::can::timing::Rates;
 use crate::damiao::{bit_rate, reg, Limits, Model, REGISTER_ID};
 use crate::drivetrain::Transmission;
 use crate::effects::EncoderSettings;
+use crate::power::PowerSpec;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -40,6 +42,9 @@ pub struct Robot {
     #[serde(default)]
     pub keyframe: Option<String>,
     pub buses: Vec<BusSpec>,
+    /// A bench supply; an ideal one without.
+    #[serde(default)]
+    pub power: Option<PowerSpec>,
     /// For the encoders' noise: each motor draws its own from it.
     #[serde(default)]
     pub seed: u64,
@@ -247,6 +252,11 @@ impl Robot {
         joints.sort();
         if let Some(w) = joints.windows(2).find(|w| w[0] == w[1]) {
             return Err(format!("two motors drive {}", w[0]));
+        }
+        if let Some(p) = self.power {
+            if !(p.volts.is_finite() && p.volts > 0.0 && p.ohms.is_finite() && p.ohms >= 0.0) {
+                return Err("power: volts are above zero, ohms zero or more".into());
+            }
         }
         Ok(())
     }

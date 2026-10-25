@@ -16,6 +16,25 @@ use crate::damiao::{
 /// say what theirs leave the factory with; assumed.
 pub const OVER_TEMPERATURE: f32 = 120.0;
 
+/// The undervoltage threshold a motor starts with, V: the least Damiao's
+/// manual recommends. What they leave the factory with isn't published.
+pub const UNDER_VOLTAGE: f32 = 15.0;
+
+/// The overvoltage threshold a motor starts with, V: the most Damiao's
+/// manual recommends, for a motor run at `volts`. What they leave the
+/// factory with isn't published.
+pub fn over_voltage(volts: f64) -> f32 {
+    if volts > 24.0 {
+        52.0
+    } else {
+        32.0
+    }
+}
+
+/// Below this, V, a motor is off: it neither hears nor answers. Assumed:
+/// the least `UV_Value` may be set to.
+pub const POWER_ON: f64 = 10.0;
+
 /// The motor's own loops in its other modes: a speed loop, and a position
 /// loop around it. Damiao sets their gains with registers (`KP_ASR`,
 /// `KI_ASR`, `KP_APR`) but doesn't publish their defaults, so these are
@@ -60,6 +79,9 @@ pub struct Registers {
     pub mode: u32,
     /// OT_VALUE, °C.
     pub over_temperature: f32,
+    /// UV_VALUE and OV_VALUE, V.
+    pub under_voltage: f32,
+    pub over_voltage: f32,
     /// The rest of Damiao's table, once written. Nothing in drydock uses
     /// them, and their factory values aren't published, so until written
     /// they get no answer rather than a made-up one.
@@ -67,9 +89,10 @@ pub struct Registers {
 }
 
 impl Registers {
-    /// As a motor leaves the factory, at these ids and ranges: classic CAN
-    /// at 1 Mbit/s (Damiao's manual), MIT mode, no timeout.
-    pub fn new(id: u16, master_id: u16, limits: Limits) -> Self {
+    /// As a motor leaves the factory, at these ids and ranges, made to run
+    /// at `volts`: classic CAN at 1 Mbit/s (Damiao's manual), MIT mode, no
+    /// timeout.
+    pub fn new(id: u16, master_id: u16, limits: Limits, volts: f64) -> Self {
         Self {
             id,
             master_id,
@@ -78,6 +101,8 @@ impl Registers {
             bit_rate: 4,
             mode: mode::MIT,
             over_temperature: OVER_TEMPERATURE,
+            under_voltage: UNDER_VOLTAGE,
+            over_voltage: over_voltage(volts),
             others: BTreeMap::new(),
         }
     }
@@ -96,6 +121,8 @@ impl Registers {
             reg::CTRL_MODE => self.mode.to_le_bytes(),
             reg::CAN_BR => self.bit_rate.to_le_bytes(),
             reg::OT_VALUE => self.over_temperature.to_le_bytes(),
+            reg::UV_VALUE => self.under_voltage.to_le_bytes(),
+            reg::OV_VALUE => self.over_voltage.to_le_bytes(),
             reg::PMAX => self.limits.p.to_le_bytes(),
             reg::VMAX => self.limits.v.to_le_bytes(),
             reg::TMAX => self.limits.t.to_le_bytes(),
@@ -113,6 +140,8 @@ impl Registers {
             reg::CTRL_MODE => self.mode = n,
             reg::CAN_BR => self.bit_rate = n,
             reg::OT_VALUE => self.over_temperature = x,
+            reg::UV_VALUE => self.under_voltage = x,
+            reg::OV_VALUE => self.over_voltage = x,
             reg::PMAX => self.limits.p = x,
             reg::VMAX => self.limits.v = x,
             reg::TMAX => self.limits.t = x,
@@ -128,6 +157,10 @@ pub struct Motor {
     /// The joint it drives, in the scene.
     pub joint: String,
     regs: Registers,
+    /// What it saved into flash: what it starts with when powered on.
+    flash: Registers,
+    /// Whether it has the voltage to run.
+    on: bool,
     status: u8,
     /// The command in force while enabled.
     command: Command,
@@ -149,7 +182,9 @@ impl Motor {
     pub fn new(joint: String, regs: Registers) -> Self {
         Self {
             joint,
+            flash: regs.clone(),
             regs,
+            on: true,
             status: status::DISABLED,
             command: Command::None,
             integral: 0.0,
@@ -173,6 +208,12 @@ impl Motor {
 
     pub fn status(&self) -> u8 {
         self.status
+    }
+
+    /// Whether it has the voltage to run: otherwise it neither hears nor
+    /// answers.
+    pub fn on(&self) -> bool {
+        self.on
     }
 
     pub fn torque(&self) -> f64 {
@@ -278,11 +319,15 @@ impl Motor {
         Some(Frame::new(self.regs.master_id, RegisterReply { motor: self.regs.id, write, rid, value }.encode()))
     }
 
-    /// Into flash, which a motor does only while disabled (Damiao's manual).
-    /// What an enabled one answers isn't in the sources: nothing, here.
-    fn save(&self) -> Option<Frame> {
-        (self.status != status::ENABLED)
-            .then(|| Frame::new(self.regs.master_id, Saved { motor: self.regs.id }.encode()))
+    /// Its registers into flash, where it starts from when powered on,
+    /// which a motor does only while disabled (Damiao's manual). What an
+    /// enabled one answers isn't in the sources: nothing, here.
+    fn save(&mut self) -> Option<Frame> {
+        if self.status == status::ENABLED {
+            return None;
+        }
+        self.flash = self.regs.clone();
+        Some(Frame::new(self.regs.master_id, Saved { motor: self.regs.id }.encode()))
     }
 
     /// A write within the register's range (Damiao's table) takes; others
@@ -346,14 +391,43 @@ impl Motor {
     /// here: cleared and enabled, it runs until it's past again.
     pub fn temperatures(&mut self, drive: f64, coil: f64) {
         (self.drive_c, self.coil_c) = (drive, coil);
-        if self.status != status::ENABLED {
-            return;
-        }
         let limit = self.regs.over_temperature as f64;
         if drive >= limit {
-            self.status = status::MOS_OVERTEMPERATURE;
+            self.trip(status::MOS_OVERTEMPERATURE);
         } else if coil >= limit {
-            self.status = status::COIL_OVERTEMPERATURE;
+            self.trip(status::COIL_OVERTEMPERATURE);
+        }
+    }
+
+    /// The bus's voltage at the motor. Below [`POWER_ON`], it's off; back
+    /// above, it starts as at power-on: disabled, from the registers it last
+    /// saved. Whether it keeps its zero isn't in the sources: it does, here.
+    /// Enabled, below `UV_Value` or above `OV_Value`, it stops with an
+    /// undervoltage or overvoltage error, until cleared, as it does for
+    /// heat.
+    pub fn power(&mut self, volts: f64) {
+        if volts < POWER_ON {
+            self.on = false;
+            self.status = status::DISABLED;
+            self.torque = 0.0;
+            return;
+        }
+        if !self.on {
+            self.on = true;
+            self.regs = self.flash.clone();
+            self.reset();
+        }
+        if volts < self.regs.under_voltage as f64 {
+            self.trip(status::UNDERVOLTAGE);
+        } else if volts > self.regs.over_voltage as f64 {
+            self.trip(status::OVERVOLTAGE);
+        }
+    }
+
+    /// Stops it with an error, if it's enabled.
+    pub fn trip(&mut self, error: u8) {
+        if self.status == status::ENABLED {
+            self.status = error;
         }
     }
 
@@ -377,7 +451,7 @@ mod tests {
     use crate::damiao::Model;
 
     fn motor() -> Motor {
-        let mut regs = Registers::new(1, 0x11, Model::DM4310.limits());
+        let mut regs = Registers::new(1, 0x11, Model::DM4310.limits(), 24.0);
         regs.timeout = 2000;
         Motor::new("j".into(), regs)
     }
@@ -436,6 +510,37 @@ mod tests {
     }
 
     #[test]
+    fn off_it_neither_runs_nor_remembers_what_it_didnt_save() {
+        let mut m = motor();
+        let write = |m: &mut Motor, rid, x: f32| {
+            m.on_register(Register::Write { motor: 1, rid, value: x.to_le_bytes() }, 0.0, 0.0, 0.0);
+        };
+        write(&mut m, reg::VMAX, 20.0);
+        assert!(m.on_register(Register::Save { motor: 1 }, 0.0, 0.0, 0.0).is_some());
+        write(&mut m, reg::PMAX, 5.0);
+        m.on_frame(&Special::Enable.encode(), 0.0, 0.0, 0.0);
+        m.power(5.0);
+        assert!(!m.on() && m.status() == status::DISABLED);
+        m.power(24.0);
+        assert!(m.on() && m.status() == status::DISABLED);
+        assert_eq!((m.regs.limits.v, m.regs.limits.p), (20.0, 12.5), "saved, and not");
+    }
+
+    #[test]
+    fn enabled_out_of_its_voltages_it_stops() {
+        let mut m = motor();
+        m.power(12.0);
+        assert_eq!(m.status(), status::DISABLED, "disabled, nothing to stop");
+        m.on_frame(&Special::Enable.encode(), 0.0, 0.0, 0.0);
+        m.power(12.0);
+        assert_eq!(m.status(), status::UNDERVOLTAGE);
+        m.on_frame(&Special::ClearError.encode(), 0.0, 0.0, 0.0);
+        m.on_frame(&Special::Enable.encode(), 0.0, 0.0, 0.0);
+        m.power(40.0);
+        assert_eq!(m.status(), status::OVERVOLTAGE);
+    }
+
+    #[test]
     fn registers() {
         let mut m = motor();
         let read = |m: &mut Motor, rid| m.on_register(Register::Read { motor: 1, rid }, 0.0, 0.0, 0.0);
@@ -448,6 +553,8 @@ mod tests {
         );
         assert!(read(&mut m, 37).is_none(), "not in Damiao's table");
         assert!(read(&mut m, 25).is_none(), "KP_ASR: its factory value isn't published");
+        let uv = RegisterReply::decode(&read(&mut m, reg::UV_VALUE).unwrap().eight().unwrap()).unwrap();
+        assert_eq!(uv.value, 15.0f32.to_le_bytes());
 
         let write = |m: &mut Motor, mode: u32| {
             let w = Register::Write { motor: 1, rid: reg::CTRL_MODE, value: mode.to_le_bytes() };

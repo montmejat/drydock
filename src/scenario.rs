@@ -11,9 +11,13 @@
 //!     fault: freeze
 //!     every: 60 s
 //!     lasts: 0.5 s            # then it recovers; without it, it doesn't
+//!   - supply: off             # the motors' supply: off, or a voltage (`18 V`)
+//!     at: 20 s
+//!     lasts: 1 s
 //! ```
 //!
-//! A fault is one of [`Breakdown`]'s. `every` is the mean time between two
+//! A joint's fault is one of [`Breakdown`]'s; the supply's sets its
+//! voltage (`power.rs`). `every` is the mean time between two
 //! (they come as a Poisson process: any moment as likely as the next), so
 //! it doesn't depend on the scene's timestep. Each fault draws from its own
 //! generator, seeded from the file's seed and its place in the list: adding
@@ -33,11 +37,18 @@ use crate::effects::{Breakdown, Rng};
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Happening {
     pub at: f64,
-    /// Which motor, counted across buses in the robot file's order.
-    pub motor: usize,
-    pub fault: Breakdown,
+    pub fault: Fault,
     /// It starts (when it ends, if it does) or it ends.
     pub what: Change,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Fault {
+    /// A motor breaks: which, counted across buses in the robot file's
+    /// order, and how.
+    Motor { motor: usize, breakdown: Breakdown },
+    /// The supply goes to this voltage, V: 0 when it's off.
+    Supply { volts: f64 },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -51,14 +62,20 @@ pub struct Scenario {
 }
 
 struct Rule {
-    /// A motor, or any, drawn each time.
-    motor: Option<usize>,
-    fault: Breakdown,
+    target: Target,
     when: When,
     lasts: Option<f64>,
     rng: Rng,
     /// When it next happens; none once it won't again.
     next: Option<f64>,
+}
+
+#[derive(Clone, Copy)]
+enum Target {
+    /// A motor, or any, drawn each time, and how it breaks.
+    Motor(Option<usize>, Breakdown),
+    /// The supply, to a voltage.
+    Supply(f64),
 }
 
 #[derive(Clone, Copy)]
@@ -78,8 +95,9 @@ struct File {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct FaultSpec {
-    joint: String,
-    fault: Breakdown,
+    joint: Option<String>,
+    fault: Option<Breakdown>,
+    supply: Option<Volts>,
     at: Option<Seconds>,
     every: Option<Seconds>,
     lasts: Option<Seconds>,
@@ -113,6 +131,32 @@ impl TryFrom<serde_yaml::Value> for Seconds {
     }
 }
 
+/// `off`, `18 V`, or a number of volts.
+#[derive(Clone, Copy, Deserialize)]
+#[serde(try_from = "serde_yaml::Value")]
+struct Volts(f64);
+
+impl TryFrom<serde_yaml::Value> for Volts {
+    type Error = String;
+
+    fn try_from(v: serde_yaml::Value) -> Result<Self, String> {
+        let volts = match &v {
+            serde_yaml::Value::Number(n) => n.as_f64().ok_or("not a number")?,
+            serde_yaml::Value::String(text) if text.trim() == "off" => 0.0,
+            serde_yaml::Value::String(text) => {
+                let text = text.trim();
+                let number = text.strip_suffix('V').unwrap_or(text).trim();
+                number.parse::<f64>().map_err(|_| format!("{text:?}: `off`, or volts, as `18 V`"))?
+            }
+            _ => return Err("`off`, or volts, as `18 V`".into()),
+        };
+        if !volts.is_finite() || volts < 0.0 {
+            return Err(format!("{volts} V: zero or more volts"));
+        }
+        Ok(Volts(volts))
+    }
+}
+
 impl Scenario {
     /// A scenario's file, for a robot whose motors drive `joints`, in the
     /// robot file's order.
@@ -126,15 +170,22 @@ impl Scenario {
         let file: File = serde_yaml::from_str(text).map_err(|e| e.to_string())?;
         let mut faults = Vec::new();
         for (n, f) in file.faults.into_iter().enumerate() {
-            let motor = match f.joint.as_str() {
-                "any" => None,
-                name => Some(joints.iter().position(|j| j == name).ok_or_else(|| {
-                    format!(
-                        "fault {}: no motor drives {name:?}; the robot's are {}, or `any`",
-                        n + 1,
-                        joints.join(", ")
-                    )
-                })?),
+            let target = match (f.joint, f.fault, f.supply) {
+                (Some(joint), Some(fault), None) => {
+                    let motor = match joint.as_str() {
+                        "any" => None,
+                        name => Some(joints.iter().position(|j| j == name).ok_or_else(|| {
+                            format!(
+                                "fault {}: no motor drives {name:?}; the robot's are {}, or `any`",
+                                n + 1,
+                                joints.join(", ")
+                            )
+                        })?),
+                    };
+                    Target::Motor(motor, fault)
+                }
+                (None, None, Some(volts)) => Target::Supply(volts.0),
+                _ => return Err(format!("fault {}: either a `joint` and its `fault`, or the `supply`", n + 1)),
             };
             let when = match (f.at, f.every) {
                 (Some(at), None) => When::At(at.0),
@@ -147,7 +198,7 @@ impl Scenario {
                 When::At(at) => at,
                 When::Every(mean) => mean * exponential(&mut rng),
             });
-            faults.push(Rule { motor, fault: f.fault, when, lasts: f.lasts.map(|s| s.0), rng, next });
+            faults.push(Rule { target, when, lasts: f.lasts.map(|s| s.0), rng, next });
         }
         Ok(Scenario { faults })
     }
@@ -158,9 +209,15 @@ impl Scenario {
         let mut due = Vec::new();
         for rule in &mut self.faults {
             while let Some(at) = rule.next.filter(|&t| t <= now) {
-                let motor = rule.motor.unwrap_or_else(|| (rule.rng.unit() * motors as f64) as usize % motors);
+                let fault = match rule.target {
+                    Target::Motor(motor, breakdown) => {
+                        let motor = motor.unwrap_or_else(|| (rule.rng.unit() * motors as f64) as usize % motors);
+                        Fault::Motor { motor, breakdown }
+                    }
+                    Target::Supply(volts) => Fault::Supply { volts },
+                };
                 let until = rule.lasts.map(|l| at + l);
-                due.push(Happening { at, motor, fault: rule.fault, what: Change::Breaks { until } });
+                due.push(Happening { at, fault, what: Change::Breaks { until } });
                 rule.next = match rule.when {
                     When::At(_) => None,
                     When::Every(mean) => Some(at + mean * exponential(&mut rule.rng)),
@@ -193,7 +250,11 @@ mod tests {
         let h = s.due(6.001, 2);
         assert_eq!(
             h,
-            [Happening { at: 6.0, motor: 1, fault: Breakdown::Dead, what: Change::Breaks { until: Some(6.5) } }]
+            [Happening {
+                at: 6.0,
+                fault: Fault::Motor { motor: 1, breakdown: Breakdown::Dead },
+                what: Change::Breaks { until: Some(6.5) }
+            }]
         );
         assert!(s.due(100.0, 2).is_empty());
     }
@@ -206,7 +267,8 @@ mod tests {
         assert_eq!(a, b);
         // About a thousand, give or take a few standard deviations (√1000 ≈ 32).
         assert!((850..1150).contains(&a.len()), "{}", a.len());
-        assert!(a.iter().any(|h| h.motor == 0) && a.iter().any(|h| h.motor == 1), "any joint");
+        let on = |m| a.iter().any(|h| matches!(h.fault, Fault::Motor { motor, .. } if motor == m));
+        assert!(on(0) && on(1), "any joint");
         let mut other =
             Scenario::parse("seed: 4\nfaults: [{ joint: any, fault: freeze, every: 10 }]", &joints()).unwrap();
         assert_ne!(a, other.due(10_000.0, 2));
@@ -218,7 +280,8 @@ mod tests {
         let two = "faults: [{ joint: elbow, fault: weak, every: 5 s }, { joint: shoulder, fault: noisy, every: 1 s }]";
         let weak = |text| {
             let h = Scenario::parse(text, &joints()).unwrap().due(100.0, 2);
-            h.into_iter().filter(|h| h.fault == Breakdown::Weak).map(|h| h.at).collect::<Vec<_>>()
+            let weak = |h: &Happening| matches!(h.fault, Fault::Motor { breakdown: Breakdown::Weak, .. });
+            h.into_iter().filter(weak).map(|h| h.at).collect::<Vec<_>>()
         };
         assert_eq!(weak(one), weak(two));
     }
@@ -232,5 +295,17 @@ mod tests {
         assert!(err("faults: [{ joint: elbow, fault: dark, at: 1 }]").contains("dark"));
         assert!(err("faults: [{ joint: elbow, fault: dead, at: soon }]").contains("seconds"));
         assert!(err("faults: [{ joint: elbow, fault: dead, every: 0 }]").contains("more than 0"));
+        assert!(err("faults: [{ joint: elbow, supply: off, at: 1 }]").contains("or the `supply`"));
+        assert!(err("faults: [{ supply: low, at: 1 }]").contains("volts"));
+    }
+
+    #[test]
+    fn the_supply_goes_off_or_to_a_voltage() {
+        let text = "faults: [{ supply: off, at: 1 s, lasts: 1 s }, { supply: 18 V, at: 5 s }]";
+        let h = Scenario::parse(text, &joints()).unwrap().due(10.0, 2);
+        assert_eq!(
+            h.iter().map(|h| h.fault).collect::<Vec<_>>(),
+            [Fault::Supply { volts: 0.0 }, Fault::Supply { volts: 18.0 }]
+        );
     }
 }
