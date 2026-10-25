@@ -2,7 +2,8 @@
 //!
 //! A frame to a motor's id is that motor's; a frame to `0x7FF` is for the
 //! motor named in its first two bytes; frames to `id + 0x100`, `+ 0x200` and
-//! `+ 0x300` are other modes than MIT, noted and ignored.
+//! `+ 0x300` are its commands in its other modes. A command for another
+//! mode than the motor's is ignored, with a note.
 //!
 //! Motors on CAN FD answer in it and understand classic frames too, as CAN
 //! FD controllers do. Motors on classic CAN don't understand CAN FD (on a
@@ -12,7 +13,7 @@ use std::collections::HashSet;
 
 use crate::can::Frame;
 use crate::damiao::motor::Motor;
-use crate::damiao::{Register, RegisterReply, REGISTER_ID};
+use crate::damiao::{mode, Register, RegisterReply, REGISTER_ID};
 
 pub struct Motors {
     motors: Vec<Motor>,
@@ -48,8 +49,19 @@ impl Motors {
 
     /// Which motor a frame is for, by its place on the bus, if any.
     pub fn addressee(&self, frame: &Frame) -> Option<usize> {
-        let id = if frame.id == REGISTER_ID { Register::decode(&frame.eight()?)?.motor() } else { frame.id };
-        self.motors.iter().position(|m| m.id == id)
+        if frame.id == REGISTER_ID {
+            let id = Register::decode(&frame.eight()?)?.motor();
+            return self.motors.iter().position(|m| m.id == id);
+        }
+        self.motors.iter().position(|m| m.id == frame.id).or_else(|| self.mode_frame(frame).map(|(i, _)| i))
+    }
+
+    /// The motor a command in another mode is for, and the mode.
+    fn mode_frame(&self, frame: &Frame) -> Option<(usize, u32)> {
+        self.motors.iter().enumerate().find_map(|(i, m)| {
+            let offset = frame.id.checked_sub(m.id)?;
+            mode::of_offset(offset).map(|mode| (i, mode))
+        })
     }
 
     /// A frame reached the motors at `now`: which one it was for, and its
@@ -63,9 +75,8 @@ impl Motors {
             ));
             return None;
         }
-        let data = frame.eight()?;
         let (motor, answer) = if frame.id == REGISTER_ID {
-            let request = Register::decode(&data)?;
+            let request = Register::decode(&frame.eight()?)?;
             let i = self.motors.iter().position(|m| m.id == request.motor())?;
             let (q, v) = state(i);
             let answer = self.motors[i].on_register(request, now, q, v);
@@ -73,12 +84,19 @@ impl Motors {
             (i, answer)
         } else if let Some(i) = self.motors.iter().position(|m| m.id == frame.id) {
             let (q, v) = state(i);
-            (i, Some(self.motors[i].on_frame(&data, now, q, v)))
-        } else {
-            if let Some(m) = self.motors.iter().find(|m| [0x100, 0x200, 0x300].iter().any(|&o| frame.id == m.id + o)) {
-                let joint = m.joint.clone();
-                self.say(format!("{joint}: a frame for another mode than MIT, which is all drydock simulates"));
+            let answer = self.motors[i].on_frame(&frame.eight()?, now, q, v);
+            if answer.is_none() {
+                self.wrong_mode(i, mode::MIT);
             }
+            (i, answer)
+        } else if let Some((i, mode)) = self.mode_frame(frame) {
+            let (q, v) = state(i);
+            let answer = self.motors[i].on_mode_frame(mode, frame.bytes(), now, q, v);
+            if answer.is_none() {
+                self.wrong_mode(i, mode);
+            }
+            (i, answer)
+        } else {
             return None;
         };
         let can_fd = self.can_fd;
@@ -99,6 +117,19 @@ impl Motors {
             }
             _ => {}
         }
+    }
+
+    /// Says, once, that motor `i` got a command for another mode than its own.
+    fn wrong_mode(&mut self, i: usize, sent: u32) {
+        let m = &self.motors[i];
+        let message = format!(
+            "{}: a {} command, but the motor is in {} mode (CTRL_MODE {}): ignored",
+            m.joint,
+            mode::name(sent),
+            mode::name(m.mode()),
+            m.mode()
+        );
+        self.say(message);
     }
 
     fn say(&mut self, message: String) {

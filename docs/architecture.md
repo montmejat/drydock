@@ -18,7 +18,7 @@ own software, unchanged.
 |---|---|
 | **Real**: the same code as on the robot | the bus master and its driver library, its socket calls, its threads and timing on the host, its handling of every answer |
 | **Modelled**: real code paths, simulated input | each motor's firmware (answers, states, registers, timeout, MIT control law), its torque limit and transmission, its encoder's errors, its faults (from a scenario), the bus's timing (frame lengths, arbitration), the robot's mechanics (MuJoCo, from the robot's own MJCF) |
-| **Absent**: not exercised at all | the bus's electrical faults (error frames, retransmissions, bus-off: a lost frame is just lost), the motors' other modes, power |
+| **Absent**: not exercised at all | the bus's electrical faults (error frames, retransmissions, bus-off: a lost frame is just lost), power |
 
 Most simulators draw the line higher: the robot's software talks to the
 simulator through an adapter of its own (a Python API, a TCP protocol), and
@@ -155,9 +155,13 @@ with an rpath.
 buses ask, at a 1 ms timestep: a CPU's job. The GPU versions read the same
 MJCF, so models move between them.
 
-**One protocol, completely.** Damiao's MIT mode, frame for frame against
-Damiao's reference driver and OpenArm's library. A second protocol half done
-would make neither trustworthy.
+**One protocol, completely.** Damiao's motors in their four modes, frame
+for frame against Damiao's reference driver and OpenArm's library, and a
+test per feature (`tests/damiao.rs`) for what's done and what isn't. A
+second protocol half done would make neither trustworthy. Where the sources
+give frames but not behaviour (the other modes' loop gains, the heat), the
+behaviour is the simplest that agrees with them, and the README names the
+assumptions.
 
 **The firmware and the physics apart.** A motor's firmware asks for a
 torque; its actuator gives what it can; the motor reports what it got, as a

@@ -9,8 +9,8 @@ knows it is simulated, so the driver and its timing are tested too, not
 replaced.
 
 drydock speaks one protocol, and tries to speak it completely: **Damiao's
-motors in MIT mode** (DM-J4310, DM-J4340, DM-J8009 and the rest), as on
-OpenArm and many other arms and legs.
+motors** (DM-J4310, DM-J4340, DM-J8009 and the rest), in MIT mode and their
+three other modes, as on OpenArm and many other arms and legs.
 
 ## Install
 
@@ -227,6 +227,10 @@ one per feature, and so is every gap: CI turns them into a table on each
 | | |
 |---|---|
 | MIT command, to `id` | `kp (p_des - p) + kd (v_des - v) + t_ff`, every physics step, within `peak_torque` |
+| Position-velocity, to `id + 0x100` | to `p_des` no faster than `v_des` (two floats); the motor's own position and speed loops |
+| Velocity, to `id + 0x200` | at `v_des` (one float, four bytes); its own speed loop |
+| Position-force, to `id + 0x300` | to `p_des` no faster than `v_des`, pushing with at most a share `i_des` of its maximum (TMAX) |
+| Modes, `CTRL_MODE` (1 to 4) | a motor takes commands in its mode only: others are ignored, unanswered, with a note; a new mode starts from no command |
 | Enable `FC`, disable `FD`, zero `FE`, clear error `FB` | each answered with feedback; enabling starts from no command; a motor in error stays in it until cleared |
 | Feedback, on `master_id` | after every frame, as the real motors answer: status, id, position, velocity, torque, and the drive's and coil's temperatures |
 | Over-temperature | past `OT_Value` (120 °C), status `B` (the drive) or `C` (the coil) and no torque, until cleared; see Heat |
@@ -235,9 +239,11 @@ one per feature, and so is every gap: CI turns them into a table on each
 
 Not yet, or not at all:
 
-- **Other modes.** Position-velocity (`id + 0x100`), velocity (`id + 0x200`)
-  and position-force (`id + 0x300`) frames are ignored, with a note. Writing another mode to
-  `CTRL_MODE` is refused: the answer says it is still MIT mode (1).
+- **The other modes' loop gains are assumed.** Damiao sets them with
+  registers (`KP_ASR`, `KI_ASR`, `KP_APR`) whose defaults it doesn't
+  publish; drydock's match the MIT gains OpenArm's driver uses (a speed gain
+  of TMAX / 20 per rad/s, an integral at ten per second, a position gain of
+  20 per second), and the registers aren't simulated.
 - **Ids can't be rewritten** over the bus; they're the robot file's.
 - **Registers other than the seven above** get no answer, with a note. That
   includes `TIMEOUT` (9): its units aren't in the sources below, so the

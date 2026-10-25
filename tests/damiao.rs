@@ -11,7 +11,9 @@
 
 use drydock::can::timing::{bits, Crossed, From, Rates, Timeline};
 use drydock::can::Frame;
-use drydock::damiao::{reg, status, Feedback, Limits, Mit, Register, RegisterReply, Special};
+use drydock::damiao::{
+    mode, reg, status, Feedback, Limits, Mit, PosForce, PosVel, Register, RegisterReply, Special, Vel,
+};
 use drydock::dock::Drydock;
 use drydock::robot::Robot;
 use drydock::scenario::Scenario;
@@ -103,6 +105,75 @@ fn mit_feedback_reports_temperatures_that_rise_with_torque() {
     assert!(warm.t_mos > 40 && warm.t_rotor > 30, "{warm:?}");
 }
 
+/* ── The other modes ── */
+
+/// Switches the slide's motor to `mode` and enables it.
+fn in_mode(dock: &mut Drydock, mode: u32) {
+    send(dock, 0x7FF, Register::Write { motor: ID, rid: reg::CTRL_MODE, value: mode.to_le_bytes() }.encode());
+    send(dock, ID, Special::Enable.encode());
+}
+
+/// `seconds` of physics, the motor sent `frame` each step; its last answer.
+fn hold_frame(dock: &mut Drydock, frame: Frame, seconds: f64, limits: Limits) -> Feedback {
+    let mut last = None;
+    for _ in 0..(seconds / dock.timestep()).round() as usize {
+        last = dock.deliver(0, &frame);
+        dock.step();
+    }
+    feedback(last.expect("answered"), limits)
+}
+
+#[test]
+fn mode_velocity_turns_at_the_speed_asked() {
+    let (mut dock, limits) = slide();
+    in_mode(&mut dock, mode::VEL);
+    // Four bytes: one float.
+    let f = hold_frame(&mut dock, Frame::short(ID + 0x200, &Vel { v: 1.0 }.encode()), 1.0, limits);
+    assert_eq!(f.status, status::ENABLED);
+    assert!((f.v - 1.0).abs() < 0.05, "{f:?}");
+}
+
+#[test]
+fn mode_position_velocity_goes_to_its_target_no_faster_than_asked() {
+    let (mut dock, limits) = slide();
+    in_mode(&mut dock, mode::POS_VEL);
+    let go = Frame::new(ID + 0x100, PosVel { p: 0.5, v: 0.5 }.encode());
+    // From -1.05 rad: about three seconds at 0.5 rad/s.
+    let f = hold_frame(&mut dock, go, 1.0, limits);
+    assert!(f.p < 0.0 && f.v > 0.4 && f.v < 0.55, "on its way, at its speed: {f:?}");
+    let f = hold_frame(&mut dock, go, 4.0, limits);
+    assert!((f.p - 0.5).abs() < 0.02 && f.v.abs() < 0.05, "there: {f:?}");
+}
+
+#[test]
+fn mode_position_force_pushes_no_harder_than_asked() {
+    let (mut dock, limits) = slide();
+    in_mode(&mut dock, mode::POS_FORCE);
+    // A kilogram on the slide weighs 0.41 N m at the motor. A tenth of its
+    // current (1 N m) lifts it to its target...
+    let lift = Frame::new(ID + 0x300, PosForce { p: 0.0, v: 1.0, i: 0.1 }.encode());
+    let f = hold_frame(&mut dock, lift, 3.0, limits);
+    assert!(f.p.abs() < 0.02 && f.t.abs() <= 1.0 + limits.t / 4095.0, "{f:?}");
+    // ...two hundredths (0.2 N m) can't hold it: it sinks, pushing all it may.
+    let weak = Frame::new(ID + 0x300, PosForce { p: 0.0, v: 1.0, i: 0.02 }.encode());
+    let f = hold_frame(&mut dock, weak, 1.0, limits);
+    assert!(f.p < -0.1 && (f.t.abs() - 0.2).abs() < 0.02, "{f:?}");
+}
+
+#[test]
+fn register_writes_of_the_control_mode_switch_modes() {
+    let (mut dock, limits) = slide();
+    in_mode(&mut dock, mode::VEL);
+    assert_eq!(u32::from_le_bytes(read(&mut dock, reg::CTRL_MODE)), mode::VEL);
+    // An MIT command in velocity mode is ignored, unanswered; a velocity
+    // command is answered.
+    assert!(send(&mut dock, ID, command(0.0, 0.0, 0.0, limits)).is_none());
+    assert!(dock.deliver(0, &Frame::short(ID + 0x200, &Vel { v: 0.0 }.encode())).is_some());
+    // No fifth mode: refused, and the answer says which it kept.
+    send(&mut dock, 0x7FF, Register::Write { motor: ID, rid: reg::CTRL_MODE, value: 5u32.to_le_bytes() }.encode());
+    assert_eq!(u32::from_le_bytes(read(&mut dock, reg::CTRL_MODE)), mode::VEL);
+}
+
 /* ── Special frames ── */
 
 #[test]
@@ -179,7 +250,7 @@ fn register_reads_of_the_ranges_ids_and_mode() {
     assert_eq!(f32::from_le_bytes(read(&mut dock, reg::TMAX)), limits.t);
     assert_eq!(u32::from_le_bytes(read(&mut dock, reg::MST_ID)), MASTER as u32);
     assert_eq!(u32::from_le_bytes(read(&mut dock, reg::ESC_ID)), ID as u32);
-    assert_eq!(u32::from_le_bytes(read(&mut dock, reg::CTRL_MODE)), reg::MIT_MODE);
+    assert_eq!(u32::from_le_bytes(read(&mut dock, reg::CTRL_MODE)), mode::MIT);
 }
 
 #[test]
@@ -261,22 +332,6 @@ fn bus_a_lossy_link_loses_about_a_tenth_of_frames_each_way() {
 }
 
 /* ── Not simulated yet ── */
-
-#[test]
-#[ignore = "not simulated: position-velocity frames (id + 0x100) are ignored, with a note"]
-fn mit_position_velocity_mode() {}
-
-#[test]
-#[ignore = "not simulated: velocity frames (id + 0x200) are ignored, with a note"]
-fn mit_speed_mode() {}
-
-#[test]
-#[ignore = "not simulated: position-force frames (id + 0x300) are ignored, with a note"]
-fn mit_force_position_mode() {}
-
-#[test]
-#[ignore = "not simulated: writing another mode is refused; the answer says MIT mode (1)"]
-fn register_writes_of_the_control_mode() {}
 
 #[test]
 #[ignore = "not simulated: ids can't be rewritten over the bus; they're the robot file's"]
