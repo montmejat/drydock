@@ -256,7 +256,7 @@ fn braking_on_a_bench_supply_charges_the_bus_until_the_motors_stop() {
     assert_eq!((statuses, most), (vec![status::ENABLED; 2], 24.0));
     // A bench supply can't: braking the swing gives back about 3 J, and the
     // two motors' capacitors take 0.2 J from 24 V to their 32 V.
-    let (statuses, most) = swing(Some(PowerSpec { volts: 24.0, ohms: 0.1 }));
+    let (statuses, most) = swing(Some(PowerSpec { volts: 24.0, ohms: 0.1, battery: false }));
     assert_eq!(statuses, vec![status::OVERVOLTAGE; 2]);
     assert!(most > 32.0, "{most} V");
 }

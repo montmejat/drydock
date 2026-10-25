@@ -7,7 +7,10 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use crate::can::timing::{Crossed, From, Rates, Timeline};
-use crate::can::{wait_any, Socket};
+use std::os::fd::{AsRawFd, RawFd};
+
+use crate::can::Socket;
+use crate::poll::wait_any;
 use crate::dock::Drydock;
 use crate::scenario::{Change, Fault, Happening};
 
@@ -144,7 +147,7 @@ pub fn realtime(mut dock: Drydock, lines: &[Line], mut trace: Option<BusTrace>) 
         t.base_ns = monotonic_ns();
     }
     let seconds = || clock.elapsed().as_secs_f64();
-    let sockets: Vec<&Socket> = lines.iter().map(|l| &l.socket).collect();
+    let sockets: Vec<RawFd> = lines.iter().map(|l| l.socket.as_raw_fd()).collect();
     let mut buses: Vec<Timeline> = lines.iter().map(|l| Timeline::new(l.rates)).collect();
     let dt = dock.timestep();
     let (mut start, mut steps) = (0.0, 0u64);
@@ -218,7 +221,7 @@ pub fn realtime(mut dock: Drydock, lines: &[Line], mut trace: Option<BusTrace>) 
 /// as on a real bus, but the same each run.
 pub fn lockstep(mut dock: Drydock, lines: &[Line], period: f64) -> io::Result<()> {
     let steps = steps_per_period(dock.timestep(), period).map_err(io::Error::other)?;
-    let sockets: Vec<&Socket> = lines.iter().map(|l| &l.socket).collect();
+    let sockets: Vec<RawFd> = lines.iter().map(|l| l.socket.as_raw_fd()).collect();
     loop {
         let ready = wait_any(&sockets, None)?;
         for (b, _) in ready.iter().enumerate().filter(|(_, &r)| r) {

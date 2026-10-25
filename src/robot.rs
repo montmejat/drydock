@@ -19,6 +19,13 @@
 //!       - { joint: finger, model: DM4310, id: 0x08, master_id: 0x18, transmission: { ratio: 0.042, offset: 0.044 } }
 //!       # An imperfect encoder. When motors break is a scenario's (`scenario.rs`).
 //!       - { joint: wrist, model: DM4310, id: 0x03, master_id: 0x13, encoder: { noise: 0.0005, quantum: 0.0004 } }
+//! # Serial buses of Dynamixel servos, each behind a pseudo-terminal drydock
+//! # links at `port`, for the robot's software to open as its serial port.
+//! serial:
+//!   - port: /tmp/microduck-tty
+//!     baud: 1000000           # optional: 1 Mbit/s by default
+//!     motors:
+//!       - { joint: right_knee, model: XL330-M288, id: 13 }
 //! power: { volts: 24, ohms: 0.1 }  # optional: a bench supply, through its wires (`power.rs`)
 //! seed: 0                     # optional: for the encoders' noise
 //! ```
@@ -41,7 +48,12 @@ pub struct Robot {
     pub scene: Scene,
     #[serde(default)]
     pub keyframe: Option<String>,
+    /// CAN buses of Damiao motors.
+    #[serde(default)]
     pub buses: Vec<BusSpec>,
+    /// Serial buses of Dynamixel servos.
+    #[serde(default)]
+    pub serial: Vec<SerialSpec>,
     /// A bench supply; an ideal one without.
     #[serde(default)]
     pub power: Option<PowerSpec>,
@@ -184,6 +196,52 @@ pub struct MotorSpec {
     pub encoder: EncoderSettings,
 }
 
+/// A half-duplex serial bus of Dynamixel servos (Protocol 2.0).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SerialSpec {
+    /// Where drydock links its end of the bus: the path the robot's
+    /// software opens, as it would `/dev/ttyS2`.
+    pub port: PathBuf,
+    /// Bits per second, as the servos are set: one of their Baud Rate
+    /// register's.
+    #[serde(default = "default_bitrate")]
+    pub baud: f64,
+    pub motors: Vec<ServoSpec>,
+}
+
+/// The Dynamixel servos drydock simulates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+pub enum ServoModel {
+    #[serde(rename = "XL330-M288")]
+    Xl330M288,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ServoSpec {
+    pub joint: String,
+    pub model: ServoModel,
+    pub id: u8,
+    /// Between the servo's horn and its joint, when they don't turn together.
+    #[serde(default)]
+    pub transmission: Transmission,
+    /// What its encoder gets wrong: perfect by default.
+    #[serde(default)]
+    pub encoder: EncoderSettings,
+}
+
+/// The Baud Rate register's codes (XL330 e-Manual): 9600, 57 600, 115 200
+/// bit/s, then 1, 2, 3 and 4 Mbit/s.
+pub const SERVO_BAUDS: [f64; 7] = [9600.0, 57600.0, 115200.0, 1e6, 2e6, 3e6, 4e6];
+
+impl SerialSpec {
+    /// The Baud Rate register's code for the bus's rate.
+    pub fn baud_code(&self) -> Option<u8> {
+        SERVO_BAUDS.iter().position(|&b| b == self.baud).map(|c| c as u8)
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LimitsSpec {
@@ -231,14 +289,21 @@ impl Robot {
         }
     }
 
-    /// Every motor, with its bus.
+    /// Every Damiao motor, with its bus.
     pub fn motors(&self) -> impl Iterator<Item = (&BusSpec, &MotorSpec)> {
         self.buses.iter().flat_map(|b| b.motors.iter().map(move |m| (b, m)))
     }
 
+    /// Every joint a motor or a servo drives, CAN buses first then serial,
+    /// each in the file's order: how a scenario counts them.
+    pub fn joints(&self) -> Vec<String> {
+        let servos = self.serial.iter().flat_map(|b| b.motors.iter().map(|m| m.joint.clone()));
+        self.motors().map(|(_, m)| m.joint.clone()).chain(servos).collect()
+    }
+
     fn check(&self) -> Result<(), String> {
-        if self.buses.is_empty() {
-            return Err("no buses".into());
+        if self.buses.is_empty() && self.serial.is_empty() {
+            return Err("no buses: a robot has CAN `buses`, `serial` buses, or both".into());
         }
         let mut interfaces = Vec::new();
         for bus in &self.buses {
@@ -248,7 +313,20 @@ impl Robot {
             interfaces.push(&bus.can);
             check_bus(bus).map_err(|e| format!("{}: {e}", bus.can))?;
         }
-        let mut joints: Vec<&str> = self.motors().map(|(_, m)| m.joint.as_str()).collect();
+        let mut ports = Vec::new();
+        for bus in &self.serial {
+            if ports.contains(&&bus.port) {
+                return Err(format!("{} is listed twice", bus.port.display()));
+            }
+            ports.push(&bus.port);
+            check_serial(bus).map_err(|e| format!("{}: {e}", bus.port.display()))?;
+        }
+        if !self.serial.is_empty() && self.power.is_none() {
+            return Err("Dynamixel servos run at 3.7 to 6 V, or from a 2S battery: say what powers them, \
+                        as `power: { volts: 7.4, battery: true }`"
+                .into());
+        }
+        let mut joints = self.joints();
         joints.sort();
         if let Some(w) = joints.windows(2).find(|w| w[0] == w[1]) {
             return Err(format!("two motors drive {}", w[0]));
@@ -260,6 +338,35 @@ impl Robot {
         }
         Ok(())
     }
+}
+
+/// Servo ids are 0 to 252 and apart from each other; the bus runs at a
+/// rate the servos do.
+fn check_serial(bus: &SerialSpec) -> Result<(), String> {
+    if bus.motors.is_empty() {
+        return Err("no motors".into());
+    }
+    if bus.baud_code().is_none() {
+        return Err(format!(
+            "baud {}: Dynamixel servos run at {} bit/s",
+            bus.baud,
+            SERVO_BAUDS.map(|b| b.to_string()).join(", ")
+        ));
+    }
+    let mut ids = Vec::new();
+    for m in &bus.motors {
+        if m.id > 252 {
+            return Err(format!("{}'s id {} isn't 0 to 252", m.joint, m.id));
+        }
+        if ids.contains(&m.id) {
+            return Err(format!("{}'s id {} is another servo's", m.joint, m.id));
+        }
+        ids.push(m.id);
+        if !m.transmission.ratio.is_finite() || m.transmission.ratio == 0.0 || !m.transmission.offset.is_finite() {
+            return Err(format!("{}: a transmission's ratio isn't zero", m.joint));
+        }
+    }
+    Ok(())
 }
 
 /// Ids must be 11-bit, apart from each other and from `0x7FF` (on one bus:
