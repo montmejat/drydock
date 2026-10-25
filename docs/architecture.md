@@ -6,8 +6,8 @@ robot's driver, its ROS 2 hardware interface, keel) opens `vcan0` instead of
 the motors would give, when they would give them, while MuJoCo moves the
 robot.
 
-This page is how it's built, why, and what's missing. The README is how to
-use it.
+This page is how it's built, why, and what's missing. The README and the
+other pages here are how to use it.
 
 ## 1. What is real, what is modelled, what is absent
 
@@ -68,6 +68,23 @@ A second protocol (Dynamixel, for Microduck) would be a sibling of `damiao`
 (its frames, its devices, which device a packet is for) on a sibling of
 `can` (a pseudo-terminal); `drivetrain`, `world`, `dock` and `run` would
 serve it as they are, with a sensor next to the drivetrain for its IMU.
+
+### Layout
+
+| | |
+|---|---|
+| `src/can/` | frames and SocketCAN; `timing.rs`, how long frames take and in what order |
+| `src/run.rs` | the clock: real time or lockstep, over every bus |
+| `src/damiao/` | `protocol.rs`, the frames; `motor.rs`, one motor's firmware; `bus.rs`, the motors on one bus |
+| `src/drivetrain.rs` | what limits a motor's torque, how it moves its joint, what it senses |
+| `src/effects.rs` | an imperfect encoder, and how a motor breaks |
+| `src/thermal.rs`, `src/power.rs` | how hot a motor gets; the supply it runs on |
+| `src/scenario.rs` | when motors break, or the supply: at set times, or at random |
+| `src/world.rs`, `shim/world.c` | MuJoCo, through a small C shim, so Rust mirrors none of its structs |
+| `src/dock.rs` | the robot: buses of motors on the world's joints |
+| `src/robot.rs` | the robot file |
+| `examples/arm` | a two-joint arm; `examples/wave.rs`, a bus master for it |
+| `examples/openarm` | OpenArm v1; `hold.cpp`, a bus master on `openarm_can`; scenarios (`*.scenario.yml`) |
 
 ## 3. A frame's way through, in real time
 
@@ -161,8 +178,8 @@ for frame against Damiao's reference driver and OpenArm's library, and a
 test per feature (`tests/damiao.rs`) for what's done and what isn't. A
 second protocol half done would make neither trustworthy. Where the sources
 give frames but not behaviour (the other modes' loop gains, the heat), the
-behaviour is the simplest that agrees with them, and the README names the
-assumptions.
+behaviour is the simplest that agrees with them, and
+[simulation.md](simulation.md) names the assumptions.
 
 **The firmware and the physics apart.** A motor's firmware asks for a
 torque; its actuator gives what it can; the motor reports what it got, as a
@@ -218,16 +235,16 @@ the simplest that respects what is published: each of the coil and the
 drive heads for a temperature that grows with the square of the torque over
 the rated torque, at its own pace, and the firmware trips at its `OT_Value`.
 The rises and time constants are chosen so that rated torque runs forever
-and peak torque trips the drive in seconds; the README lists them as
-assumptions. A better source replaces them; nothing else changes.
+and peak torque trips the drive in seconds; [simulation.md](simulation.md#heat)
+lists them as assumptions. A better source replaces them; nothing else changes.
 
 **Power is derived too.** The supply is ideal unless the robot file
 describes one: then it sags through its wires as the motors draw, and can't
 take back what they give braking, which charges the bus's capacitors. That
 is the simplest model where both a brownout and a hard stop on a bench
 supply trip what they trip on a real robot. A motor's coil losses, its idle
-draw and its capacitance aren't published; the README names the three
-assumptions. The thresholds are the motor's `UV_Value` and `OV_Value`,
+draw and its capacitance aren't published; [simulation.md](simulation.md#power)
+names the three assumptions. The thresholds are the motor's `UV_Value` and `OV_Value`,
 started at what Damiao's manual recommends.
 
 **Faults are a scenario's, and say nothing.** A scenario file, beside the

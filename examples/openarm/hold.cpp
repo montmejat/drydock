@@ -6,7 +6,7 @@
 //
 //   examples/openarm/hold [seconds] [--classic]     (vcan0, CAN FD unless --classic)
 //
-// Built against openarm_can 1.4.1: see the README's OpenArm section.
+// Built against openarm_can 1.4.1: see docs/openarm.md.
 
 #include <chrono>
 #include <cmath>

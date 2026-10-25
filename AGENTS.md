@@ -1,8 +1,11 @@
 # Working on drydock
 
 Instructions for any agent changing this repository (Claude Code reads them
-through `CLAUDE.md`). The README is what drydock is; `docs/architecture.md`
-is how it works and why.
+through `CLAUDE.md`). The README is what drydock is and how to run it, in
+brief. `docs/` has the rest: the robot file (`robot-file.md`), scenarios
+(`scenarios.md`), what's simulated, its assumptions and its sources
+(`simulation.md`), OpenArm (`openarm.md`), and how it works and why
+(`architecture.md`).
 
 ## What drydock promises
 
@@ -10,8 +13,9 @@ is how it works and why.
   motors over SocketCAN must not be able to tell drydock from the real
   motors: the same frames, the same answers, the same timing on the bus.
   When the real motors and a simpler model disagree, the real motors win.
-  Every claim about a protocol comes from a source (README, Sources), never
-  from a guess; where the sources are silent, say so rather than invent.
+  Every claim about a protocol comes from a source (`docs/simulation.md`,
+  Sources), never from a guess; where the sources are silent, say so rather
+  than invent.
 - **One protocol, done completely**: Damiao's MIT mode. Its coverage is
   `tests/damiao.rs`: one test per feature, and an ignored test with its
   reason for each gap. A new feature, or a gap closed, changes that file;
@@ -26,7 +30,8 @@ is how it works and why.
 
 The robot file's format (`src/robot.rs`), the frames on the bus, and the
 command line. Changing any of them is a breaking change: say so in the pull
-request (label `breaking`), and update the README and the examples with it.
+request (label `breaking`), and update the README, `docs/` and the examples
+with it.
 
 ## Before saying a change is done
 
@@ -46,8 +51,8 @@ cargo run --release --example wave -- examples/arm/robot.yml --seconds 3
 ```
 
 CI runs all of this on every pull request. A change is done when CI passes,
-the README says what changed for someone using drydock, and the examples
-still run.
+the README or `docs/` says what changed for someone using drydock, and the
+examples still run.
 
 ## How the code is written
 
