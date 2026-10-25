@@ -5,9 +5,11 @@
 //! (`drivetrain.rs`): it is handed its own angle and velocity, the time, the
 //! torque it was given, and how hot it is (`thermal.rs`).
 
+use std::collections::BTreeMap;
+
 use crate::can::Frame;
 use crate::damiao::{
-    mode, reg, status, Feedback, Limits, Mit, PosForce, PosVel, Register, RegisterReply, Special, Vel,
+    mode, reg, status, Feedback, Limits, Mit, PosForce, PosVel, Register, RegisterReply, Saved, Special, Vel,
 };
 
 /// The over-temperature threshold a motor starts with, °C. Damiao doesn't
@@ -39,22 +41,94 @@ enum Command {
     PosForce(PosForce),
 }
 
+/// What a motor holds in its registers: what writes through `0x7FF` change,
+/// at once.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Registers {
+    /// ESC_ID: where its commands go.
+    pub id: u16,
+    /// MST_ID: where its answers go.
+    pub master_id: u16,
+    /// PMAX, VMAX, TMAX.
+    pub limits: Limits,
+    /// TIMEOUT, in [`reg::TIMEOUT_UNIT`]: without a frame for this long, it
+    /// stops with [`status::COMMUNICATION_LOST`]. 0 for never.
+    pub timeout: u32,
+    /// CAN_BR: the bit rate it runs its bus at, as a code.
+    pub bit_rate: u32,
+    /// CTRL_MODE: which commands it takes.
+    pub mode: u32,
+    /// OT_VALUE, °C.
+    pub over_temperature: f32,
+    /// The rest of Damiao's table, once written. Nothing in drydock uses
+    /// them, and their factory values aren't published, so until written
+    /// they get no answer rather than a made-up one.
+    others: BTreeMap<u8, [u8; 4]>,
+}
+
+impl Registers {
+    /// As a motor leaves the factory, at these ids and ranges: classic CAN
+    /// at 1 Mbit/s (Damiao's manual), MIT mode, no timeout.
+    pub fn new(id: u16, master_id: u16, limits: Limits) -> Self {
+        Self {
+            id,
+            master_id,
+            limits,
+            timeout: 0,
+            bit_rate: 4,
+            mode: mode::MIT,
+            over_temperature: OVER_TEMPERATURE,
+            others: BTreeMap::new(),
+        }
+    }
+
+    /// The timeout, seconds, if it has one.
+    pub fn timeout(&self) -> Option<f64> {
+        (self.timeout > 0).then_some(self.timeout as f64 * reg::TIMEOUT_UNIT)
+    }
+
+    /// Its value, if drydock knows it.
+    fn get(&self, rid: u8) -> Option<[u8; 4]> {
+        Some(match rid {
+            reg::MST_ID => (self.master_id as u32).to_le_bytes(),
+            reg::ESC_ID => (self.id as u32).to_le_bytes(),
+            reg::TIMEOUT => self.timeout.to_le_bytes(),
+            reg::CTRL_MODE => self.mode.to_le_bytes(),
+            reg::CAN_BR => self.bit_rate.to_le_bytes(),
+            reg::OT_VALUE => self.over_temperature.to_le_bytes(),
+            reg::PMAX => self.limits.p.to_le_bytes(),
+            reg::VMAX => self.limits.v.to_le_bytes(),
+            reg::TMAX => self.limits.t.to_le_bytes(),
+            _ => return self.others.get(&rid).copied(),
+        })
+    }
+
+    /// A value [`reg::takes`] said it takes.
+    fn set(&mut self, rid: u8, value: [u8; 4]) {
+        let (x, n) = (f32::from_le_bytes(value), u32::from_le_bytes(value));
+        match rid {
+            reg::MST_ID => self.master_id = n as u16,
+            reg::ESC_ID => self.id = n as u16,
+            reg::TIMEOUT => self.timeout = n,
+            reg::CTRL_MODE => self.mode = n,
+            reg::CAN_BR => self.bit_rate = n,
+            reg::OT_VALUE => self.over_temperature = x,
+            reg::PMAX => self.limits.p = x,
+            reg::VMAX => self.limits.v = x,
+            reg::TMAX => self.limits.t = x,
+            _ => {
+                self.others.insert(rid, value);
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Motor {
     /// The joint it drives, in the scene.
     pub joint: String,
-    /// Its CAN id (ESC_ID), where commands go.
-    pub id: u16,
-    /// Where its answers go (MST_ID).
-    pub master_id: u16,
-    /// PMAX, VMAX, TMAX: writable through registers.
-    pub limits: Limits,
-    /// Without a frame for this long, seconds, it disables itself with
-    /// [`status::COMMUNICATION_LOST`].
-    pub timeout: Option<f64>,
+    regs: Registers,
     status: u8,
-    /// CTRL_MODE: which commands it takes.
-    mode: u32,
     /// The command in force while enabled.
     command: Command,
     /// The speed loop's integral, N m, and when the law last ran.
@@ -66,33 +140,35 @@ pub struct Motor {
     zero: f64,
     /// The torque it got on the last step, which it reports.
     torque: f64,
-    /// OT_VALUE, °C.
-    over_temperature: f32,
     /// Its drive's and its coil's temperatures, °C, which it reports.
     drive_c: f64,
     coil_c: f64,
 }
 
 impl Motor {
-    pub fn new(joint: String, id: u16, master_id: u16, limits: Limits, timeout: Option<f64>) -> Self {
+    pub fn new(joint: String, regs: Registers) -> Self {
         Self {
             joint,
-            id,
-            master_id,
-            limits,
-            timeout,
+            regs,
             status: status::DISABLED,
-            mode: mode::MIT,
             command: Command::None,
             integral: 0.0,
             last_law: None,
             heard: 0.0,
             zero: 0.0,
             torque: 0.0,
-            over_temperature: OVER_TEMPERATURE,
             drive_c: crate::thermal::AMBIENT,
             coil_c: crate::thermal::AMBIENT,
         }
+    }
+
+    pub fn registers(&self) -> &Registers {
+        &self.regs
+    }
+
+    /// Its CAN id, where its commands go.
+    pub fn id(&self) -> u16 {
+        self.regs.id
     }
 
     pub fn status(&self) -> u8 {
@@ -105,7 +181,7 @@ impl Motor {
 
     /// The mode it's in.
     pub fn mode(&self) -> u32 {
-        self.mode
+        self.regs.mode
     }
 
     /// A frame to its id: one of the special frames, in any mode, or an MIT
@@ -135,10 +211,10 @@ impl Motor {
                     self.status = status::DISABLED;
                 }
             }
-            None if self.mode != mode::MIT => return None,
+            None if self.regs.mode != mode::MIT => return None,
             None => {
                 if self.status == status::ENABLED {
-                    self.command = Command::Mit(Mit::decode(data, self.limits));
+                    self.command = Command::Mit(Mit::decode(data, self.regs.limits));
                 }
             }
         }
@@ -152,7 +228,7 @@ impl Motor {
     /// `+ 0x300`: taken while enabled in that mode, and answered with
     /// feedback. In another mode, or malformed, it's ignored, unanswered.
     pub fn on_mode_frame(&mut self, mode: u32, data: &[u8], now: f64, q: f64, v: f64) -> Option<Frame> {
-        if mode != self.mode {
+        if mode != self.regs.mode {
             return None;
         }
         let command = match mode {
@@ -176,62 +252,50 @@ impl Motor {
         self.integral = 0.0;
     }
 
-    /// A register request for this motor. Reads and writes are answered
-    /// with the register's value after them, so a write it refused answers
-    /// with the value it kept. A register it doesn't simulate gets no
-    /// answer. Save answers nothing; refresh, with feedback.
+    /// A register request for this motor. Reads and writes of a register
+    /// in Damiao's table are answered with its value after them, so a write
+    /// it refused answers with the value it kept; registers whose value
+    /// drydock doesn't know, and registers outside the table, get no
+    /// answer. A write takes effect at once, so a new id or master id
+    /// answers as the new one (whether the real motors answer as the old
+    /// one isn't in the sources). Refresh answers with feedback; save, when
+    /// disabled, with done.
     pub fn on_register(&mut self, request: Register, now: f64, q: f64, v: f64) -> Option<Frame> {
         self.heard = now;
         let (rid, write) = match request {
             Register::Refresh { .. } => return Some(self.feedback(q, v)),
-            Register::Save { .. } => return None,
+            Register::Save { .. } => return self.save(),
             Register::Read { rid, .. } => (rid, false),
             Register::Write { rid, value, .. } => {
                 self.write(rid, value);
                 (rid, true)
             }
         };
-        let value = self.register(rid)?;
-        Some(Frame::new(self.master_id, RegisterReply { motor: self.id, write, rid, value }.encode()))
+        let value = match rid {
+            reg::XOUT => ((q - self.zero) as f32).to_le_bytes(),
+            _ => self.regs.get(rid)?,
+        };
+        Some(Frame::new(self.regs.master_id, RegisterReply { motor: self.regs.id, write, rid, value }.encode()))
     }
 
-    /// A register's value, if simulated.
-    pub fn register(&self, rid: u8) -> Option<[u8; 4]> {
-        Some(match rid {
-            reg::OT_VALUE => self.over_temperature.to_le_bytes(),
-            reg::MST_ID => (self.master_id as u32).to_le_bytes(),
-            reg::ESC_ID => (self.id as u32).to_le_bytes(),
-            reg::CTRL_MODE => self.mode.to_le_bytes(),
-            reg::PMAX => self.limits.p.to_le_bytes(),
-            reg::VMAX => self.limits.v.to_le_bytes(),
-            reg::TMAX => self.limits.t.to_le_bytes(),
-            _ => return None,
-        })
+    /// Into flash, which a motor does only while disabled (Damiao's manual).
+    /// What an enabled one answers isn't in the sources: nothing, here.
+    fn save(&self) -> Option<Frame> {
+        (self.status != status::ENABLED)
+            .then(|| Frame::new(self.regs.master_id, Saved { motor: self.regs.id }.encode()))
     }
 
-    /// The ranges, the over-temperature threshold within 80 to 200 °C, and
-    /// the mode (1 to 4) are writable. A new mode starts from no command.
-    /// The ids aren't, since the bus would have to change under drydock.
+    /// A write within the register's range (Damiao's table) takes; others
+    /// don't, nor do writes to read-only registers. A new mode starts from
+    /// no command.
     fn write(&mut self, rid: u8, value: [u8; 4]) {
-        if rid == reg::CTRL_MODE {
-            let m = u32::from_le_bytes(value);
-            if (mode::MIT..=mode::POS_FORCE).contains(&m) && m != self.mode {
-                self.mode = m;
-                self.reset();
-            }
+        if !reg::takes(rid, value) {
             return;
         }
-        let x = f32::from_le_bytes(value);
-        if !(x.is_finite() && x > 0.0) {
-            return;
+        if rid == reg::CTRL_MODE && u32::from_le_bytes(value) != self.regs.mode {
+            self.reset();
         }
-        match rid {
-            reg::OT_VALUE if (80.0..200.0).contains(&x) => self.over_temperature = x,
-            reg::PMAX => self.limits.p = x,
-            reg::VMAX => self.limits.v = x,
-            reg::TMAX => self.limits.t = x,
-            _ => {}
-        }
+        self.regs.set(rid, value);
     }
 
     /// The torque it asks for until the next step, while enabled: the MIT
@@ -241,14 +305,14 @@ impl Motor {
     pub fn law(&mut self, now: f64, q: f64, v: f64) -> f64 {
         let dt = self.last_law.map_or(0.0, |t| (now - t).max(0.0));
         self.last_law = Some(now);
-        if self.status == status::ENABLED && self.timeout.is_some_and(|t| now - self.heard > t) {
+        if self.status == status::ENABLED && self.regs.timeout().is_some_and(|t| now - self.heard > t) {
             self.status = status::COMMUNICATION_LOST;
         }
         if self.status != status::ENABLED {
             return 0.0;
         }
         let p = q - self.zero;
-        let tmax = self.limits.t as f64;
+        let tmax = self.regs.limits.t as f64;
         let toward = |target: f32, speed: f32| {
             (POSITION_GAIN * (target as f64 - p)).clamp(-speed.abs() as f64, speed.abs() as f64)
         };
@@ -265,7 +329,7 @@ impl Motor {
     /// The speed loop: the torque that turns it at `wanted` (rad/s), turning
     /// at `v`, at most `limit` (N m) either way.
     fn speed(&mut self, wanted: f64, v: f64, dt: f64, limit: f64) -> f64 {
-        let gain = SPEED_GAIN * self.limits.t as f64;
+        let gain = SPEED_GAIN * self.regs.limits.t as f64;
         let error = wanted - v;
         self.integral = (self.integral + SPEED_INTEGRAL * gain * error * dt).clamp(-limit, limit);
         (gain * error + self.integral).clamp(-limit, limit)
@@ -285,7 +349,7 @@ impl Motor {
         if self.status != status::ENABLED {
             return;
         }
-        let limit = self.over_temperature as f64;
+        let limit = self.regs.over_temperature as f64;
         if drive >= limit {
             self.status = status::MOS_OVERTEMPERATURE;
         } else if coil >= limit {
@@ -295,7 +359,7 @@ impl Motor {
 
     fn feedback(&self, q: f64, v: f64) -> Frame {
         let f = Feedback {
-            id: (self.id & 0xF) as u8,
+            id: (self.regs.id & 0xF) as u8,
             status: self.status,
             p: (q - self.zero) as f32,
             v: v as f32,
@@ -303,7 +367,7 @@ impl Motor {
             t_mos: self.drive_c.round().clamp(0.0, 255.0) as u8,
             t_rotor: self.coil_c.round().clamp(0.0, 255.0) as u8,
         };
-        Frame::new(self.master_id, f.encode(self.limits))
+        Frame::new(self.regs.master_id, f.encode(self.regs.limits))
     }
 }
 
@@ -313,11 +377,13 @@ mod tests {
     use crate::damiao::Model;
 
     fn motor() -> Motor {
-        Motor::new("j".into(), 1, 0x11, Model::DM4310.limits(), Some(0.1))
+        let mut regs = Registers::new(1, 0x11, Model::DM4310.limits());
+        regs.timeout = 2000;
+        Motor::new("j".into(), regs)
     }
 
     fn command(m: &Motor, c: Mit) -> [u8; 8] {
-        c.encode(m.limits)
+        c.encode(m.regs.limits)
     }
 
     #[test]
@@ -330,7 +396,7 @@ mod tests {
         m.on_frame(&c, 0.0, 0.0, 0.0);
         let t = m.law(0.0, 0.5, 1.0);
         // The law on the command as packed: kp has 12 bits over 0..500.
-        let d = Mit::decode(&c, m.limits);
+        let d = Mit::decode(&c, m.regs.limits);
         let law = d.kp as f64 * (d.p as f64 - 0.5) + d.kd as f64 * (d.v as f64 - 1.0) + d.t as f64;
         assert!((t - law).abs() < 1e-9, "{t} {law}");
         assert!((t - 0.75).abs() < 0.1, "{t}");
@@ -342,7 +408,7 @@ mod tests {
         m.on_frame(&Special::Enable.encode(), 0.0, 0.0, 0.0);
         m.applied(-1.5);
         let f = m.on_frame(&Special::Enable.encode(), 0.0, 0.0, 0.0).unwrap();
-        assert!((Feedback::decode(&f.eight().unwrap(), m.limits).t + 1.5).abs() < 0.01);
+        assert!((Feedback::decode(&f.eight().unwrap(), m.regs.limits).t + 1.5).abs() < 0.01);
     }
 
     #[test]
@@ -366,7 +432,7 @@ mod tests {
         let mut m = motor();
         m.on_frame(&Special::Zero.encode(), 0.0, 1.5, 0.0);
         let f = m.on_frame(&Special::Enable.encode(), 0.0, 1.75, 0.0).unwrap();
-        assert!((Feedback::decode(&f.eight().unwrap(), m.limits).p - 0.25).abs() < 1e-3);
+        assert!((Feedback::decode(&f.eight().unwrap(), m.regs.limits).p - 0.25).abs() < 1e-3);
     }
 
     #[test]
@@ -376,7 +442,12 @@ mod tests {
         let f = read(&mut m, reg::PMAX).unwrap();
         assert_eq!(f.id, 0x11);
         assert_eq!(RegisterReply::decode(&f.eight().unwrap()).unwrap().value, 12.5f32.to_le_bytes());
-        assert!(read(&mut m, reg::TIMEOUT).is_none());
+        assert_eq!(
+            RegisterReply::decode(&read(&mut m, reg::TIMEOUT).unwrap().eight().unwrap()).unwrap().value,
+            2000u32.to_le_bytes()
+        );
+        assert!(read(&mut m, 37).is_none(), "not in Damiao's table");
+        assert!(read(&mut m, 25).is_none(), "KP_ASR: its factory value isn't published");
 
         let write = |m: &mut Motor, mode: u32| {
             let w = Register::Write { motor: 1, rid: reg::CTRL_MODE, value: mode.to_le_bytes() };
@@ -390,6 +461,6 @@ mod tests {
 
         let write = Register::Write { motor: 1, rid: reg::TMAX, value: 20.0f32.to_le_bytes() };
         m.on_register(write, 0.0, 0.0, 0.0);
-        assert_eq!(m.limits.t, 20.0);
+        assert_eq!(m.regs.limits.t, 20.0);
     }
 }

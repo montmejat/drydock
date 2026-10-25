@@ -168,15 +168,18 @@ torque; its actuator gives what it can; the motor reports what it got, as a
 real drive reports its measured current. Limits, and later noise, delay and
 faults, live in the drivetrain, not in the protocol's code.
 
-**Unknown registers get no answer.** drydock answers the registers it
-simulates (`MST_ID`, `ESC_ID`, `CTRL_MODE`, `PMAX`, `VMAX`, `TMAX`) and
-stays silent on the others, saying so once. Answering a register it doesn't
-model with a made-up value would let a driver believe something false; a
-missing answer is a failure the driver already handles.
+**Unknown values get no answer.** drydock answers every register in
+Damiao's table whose value it knows: the ones it models, and the others
+once a bus master has written them. A register whose value isn't published
+(a version, the motor's resistance, a factory gain) stays silent until
+written, saying so once. Answering with a made-up value would let a driver
+believe something false; a missing answer is a failure the driver already
+handles.
 
-**Refused writes answer with the kept value.** Writing another mode to
-`CTRL_MODE`, or new ids, is answered with the value the motor keeps, which
-is how a driver that checks its writes (both reference drivers do) finds out.
+**Refused writes answer with the kept value.** A write out of the
+register's range (Damiao's table), to a read-only register, or of another
+motor's id, is answered with the value the motor keeps, which is how a
+driver that checks its writes (both reference drivers do) finds out.
 
 **Torque goes in as an applied force.** `qfrc_applied` on the joint's degree
 of freedom, rather than a MuJoCo actuator, so a scene needs no edits and the

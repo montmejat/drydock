@@ -4,8 +4,9 @@
 //! passes, is up to the caller (`run.rs`).
 
 use crate::can::Frame;
+use crate::damiao::bit_rate;
 use crate::damiao::bus::Motors;
-use crate::damiao::motor::Motor;
+use crate::damiao::motor::{Motor, Registers};
 use crate::drivetrain::{Actuator, Drivetrain};
 use crate::effects::{Breakdown, Encoder, Rng};
 use crate::robot::Robot;
@@ -40,13 +41,15 @@ impl Drydock {
         let mut buses = Vec::new();
         for (b, spec) in robot.buses.iter().enumerate() {
             let (mut motors, mut drivetrains) = (Vec::new(), Vec::new());
+            let rate = bit_rate::code(spec.fd, spec.bitrate, spec.data_bitrate).expect("checked with the robot file");
             for (i, m) in spec.motors.iter().enumerate() {
                 let joint = world.joint(&m.joint)?;
                 if world.release_actuators(joint) > 0 {
                     eprintln!("drydock: the scene's actuator(s) on `{}` are off: its motor drives it", m.joint);
                 }
-                let timeout = m.timeout_ms.map(|ms| ms / 1e3);
-                motors.push(Motor::new(m.joint.clone(), m.id, m.master_id, m.limits(), timeout));
+                let mut regs = Registers::new(m.id, m.master_id, m.limits());
+                (regs.timeout, regs.bit_rate) = (m.timeout(), rate);
+                motors.push(Motor::new(m.joint.clone(), regs));
                 let actuator = Actuator { peak_torque: m.peak_torque() };
                 // Each motor's own noise, the same every run.
                 let seed = robot.seed ^ (((b as u64) << 32) | (i as u64 + 1));
@@ -61,7 +64,7 @@ impl Drydock {
                 });
             }
             let heard = vec![false; motors.len()];
-            buses.push(Bus { motors: Motors::new(motors, spec.fd), drivetrains, heard });
+            buses.push(Bus { motors: Motors::new(motors, spec.fd, rate), drivetrains, heard });
         }
         let links = Rng::new(robot.seed ^ 0x6c696e6b);
         Ok(Self { world, buses, scenario: None, happened: Vec::new(), links })
