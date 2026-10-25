@@ -61,8 +61,7 @@ pub struct Drivetrain {
     pub transmission: Transmission,
     pub encoder: Encoder,
     pub thermal: Thermal,
-    /// What's broken, each until when (or for good), latest last: the
-    /// latest is what shows.
+    /// What's broken, each until when (or for good).
     pub faults: Vec<(Breakdown, Option<f64>)>,
 }
 
@@ -71,25 +70,26 @@ impl Drivetrain {
     /// `v`: through the transmission, then its encoder.
     pub fn sense(&mut self, now: f64, q: f64, v: f64) -> (f64, f64) {
         let (theta, omega) = self.transmission.to_motor(q, v);
-        let fault = self.breakdown();
-        self.encoder.sense(now, theta, omega, fault)
+        let faults = &self.faults;
+        self.encoder.sense(now, theta, omega, |b| faults.iter().any(|&(f, _)| f == b))
     }
 
-    /// The torque the motor gives at `now`, its firmware asking for `asked`:
-    /// within its peak, unless it has broken.
+    /// The torque the motor gives, its firmware asking for `asked`: within
+    /// its peak, unless it has broken.
     pub fn torque(&self, asked: f64) -> f64 {
-        effects::torque(self.actuator.torque(asked), self.breakdown())
+        effects::torque(self.actuator.torque(asked), |b| self.has(b))
     }
 
     /// `dt` seconds of giving `torque`: how hot it gets.
     pub fn heat(&mut self, dt: f64, torque: f64) {
-        let heating = if self.faults.iter().any(|&(f, _)| f == Breakdown::Overheat) { LOST_COOLING } else { 1.0 };
+        let heating = if self.has(Breakdown::Overheat) { LOST_COOLING } else { 1.0 };
         self.thermal.step(dt, torque, heating);
     }
 
-    /// What shows of what's broken: the latest fault.
-    pub fn breakdown(&self) -> Option<Breakdown> {
-        self.faults.last().map(|&(fault, _)| fault)
+    /// Whether it has that fault now. Faults add up: a dead motor that's
+    /// also disconnected is still dead.
+    pub fn has(&self, fault: Breakdown) -> bool {
+        self.faults.iter().any(|&(f, _)| f == fault)
     }
 
     /// The faults that are over at `now`, gone.

@@ -18,7 +18,7 @@ own software, unchanged.
 |---|---|
 | **Real**: the same code as on the robot | the bus master and its driver library, its socket calls, its threads and timing on the host, its handling of every answer |
 | **Modelled**: real code paths, simulated input | each motor's firmware (answers, states, registers, timeout, MIT control law), its torque limit and transmission, its encoder's errors, its faults (from a scenario), the bus's timing (frame lengths, arbitration), the robot's mechanics (MuJoCo, from the robot's own MJCF) |
-| **Absent**: not exercised at all | the bus's electrical faults (error frames, bus-off), the motors' other modes, power |
+| **Absent**: not exercised at all | the bus's electrical faults (error frames, retransmissions, bus-off: a lost frame is just lost), the motors' other modes, power |
 
 Most simulators draw the line higher: the robot's software talks to the
 simulator through an adapter of its own (a Python API, a TCP protocol), and

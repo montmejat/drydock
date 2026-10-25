@@ -7,7 +7,7 @@ use crate::can::Frame;
 use crate::damiao::bus::Motors;
 use crate::damiao::motor::Motor;
 use crate::drivetrain::{Actuator, Drivetrain};
-use crate::effects::Encoder;
+use crate::effects::{Breakdown, Encoder, Rng};
 use crate::robot::Robot;
 use crate::scenario::{Change, Happening, Scenario};
 use crate::thermal::Thermal;
@@ -19,6 +19,8 @@ pub struct Drydock {
     scenario: Option<Scenario>,
     /// What the scenario did, not yet asked for.
     happened: Vec<Happening>,
+    /// Which frames a lossy link loses.
+    links: Rng,
 }
 
 /// One bus's motors, and their ways to their joints.
@@ -61,7 +63,8 @@ impl Drydock {
             let heard = vec![false; motors.len()];
             buses.push(Bus { motors: Motors::new(motors, spec.fd), drivetrains, heard });
         }
-        Ok(Self { world, buses, scenario: None, happened: Vec::new() })
+        let links = Rng::new(robot.seed ^ 0x6c696e6b);
+        Ok(Self { world, buses, scenario: None, happened: Vec::new(), links })
     }
 
     /// What happens to the robot as time passes.
@@ -132,9 +135,22 @@ impl Drydock {
     }
 
     /// A frame reached the motors on bus `bus`: the answer, if one answers.
+    ///
+    /// A motor whose link is down neither hears the frame nor answers; a
+    /// lossy link loses about one frame in ten, each way. Either way the
+    /// frame was on the bus, so a lockstep cycle counts it.
     pub fn deliver(&mut self, bus: usize, frame: &Frame) -> Option<Frame> {
+        /// One frame in ten, on a lossy link.
+        const LOSS: f64 = 0.1;
         let now = self.world.time();
-        let (world, b) = (&self.world, &mut self.buses[bus]);
+        let (world, b, links) = (&self.world, &mut self.buses[bus], &mut self.links);
+        if let Some(i) = b.motors.addressee(frame) {
+            b.heard[i] = true;
+            let link = &b.drivetrains[i];
+            if link.has(Breakdown::Disconnected) || (link.has(Breakdown::Lossy) && links.unit() < LOSS) {
+                return None;
+            }
+        }
         let drivetrains = &mut b.drivetrains;
         let state = |i: usize| {
             let d = &mut drivetrains[i];
@@ -143,6 +159,9 @@ impl Drydock {
         };
         let delivery = b.motors.deliver(frame, now, state)?;
         b.heard[delivery.motor] = true;
+        if b.drivetrains[delivery.motor].has(Breakdown::Lossy) && links.unit() < LOSS {
+            return None;
+        }
         delivery.answer
     }
 

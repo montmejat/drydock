@@ -46,6 +46,12 @@ impl Motors {
         self.can_fd
     }
 
+    /// Which motor a frame is for, by its place on the bus, if any.
+    pub fn addressee(&self, frame: &Frame) -> Option<usize> {
+        let id = if frame.id == REGISTER_ID { Register::decode(&frame.eight()?)?.motor() } else { frame.id };
+        self.motors.iter().position(|m| m.id == id)
+    }
+
     /// A frame reached the motors at `now`: which one it was for, and its
     /// answer. `state(i)` is motor `i`'s angle and velocity, as it senses
     /// them.

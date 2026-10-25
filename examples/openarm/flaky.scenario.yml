@@ -1,6 +1,6 @@
 # An arm that's seen better days: now and then an encoder freezes for half a
-# second, or reads noisily for a few; once in a long while, a drive goes
-# weak for good. At random, the same each run with the same seed.
+# second, or reads noisily for a few, or a connector comes loose for a few
+# frames; once in a long while, a drive goes weak for good. At random, the same each run with the same seed.
 #
 #   drydock examples/openarm/robot.yml --scenario examples/openarm/flaky.scenario.yml
 seed: 1
@@ -13,6 +13,10 @@ faults:
     fault: noisy
     every: 45 s
     lasts: 3 s
+  - joint: any
+    fault: disconnected
+    every: 120 s
+    lasts: 20 ms
   - joint: any
     fault: weak
     every: 600 s
