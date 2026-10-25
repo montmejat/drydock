@@ -1,0 +1,19 @@
+<!-- A trunk, free, pitched 0.3 rad nose down, with an IMU site and a leg on
+     a hinge: what the IMU board and a servo need, without the duck. -->
+<mujoco model="trunk">
+  <option timestep="0.002"/>
+  <worldbody>
+    <body name="trunk" pos="0 0 1">
+      <freejoint name="free"/>
+      <geom type="box" size="0.05 0.03 0.02" mass="0.3"/>
+      <site name="imu"/>
+      <body name="leg" pos="0 0 -0.02">
+        <joint name="hip" type="hinge" axis="0 1 0" armature="0.0018077432831600838"/>
+        <geom type="capsule" fromto="0 0 0 0 0 -0.08" size="0.01" mass="0.05"/>
+      </body>
+    </body>
+  </worldbody>
+  <keyframe>
+    <key name="pitched" qpos="0 0 1 0.98877 0 0.14944 0 0"/>
+  </keyframe>
+</mujoco>

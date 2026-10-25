@@ -88,8 +88,14 @@ power: { volts: 5.0, battery: true }
   3 or 4 Mbit/s. Their Baud Rate register starts at it.
 - A servo: `joint`, `model` (`XL330-M288`), `id` (0 to 252), and, as a
   motor, `transmission` and `encoder`. It starts as it leaves the factory,
-  at that id and rate: the robot's software sets the rest, as on the real
-  robot.
+  at that id and rate, unless `eeprom` says how the robot's servos are set
+  up already: `eeprom: { return_delay_time: 0, shutdown: 52 }`, by the names
+  rustypot gives its EEPROM items. Without a `joint`, a servo answers and
+  holds where it's told (the Microduck's mouth, which its model leaves out).
+- `imu: { id, site, mount, noise }`: the Microduck's IMU board on the bus,
+  sensing the motion of `site` in the scene, turned by `mount` (a quaternion,
+  w x y z, the board's frame in the site's), its gyro with `noise` (rad/s,
+  none by default).
 - `power` must say what runs the servos: an XL330 takes 3.7 to 6 V, or a 2S
   battery with its input-voltage shutdown turned off, as the Microduck has.
   `battery: true` makes the supply a battery, which sags behind its `ohms`

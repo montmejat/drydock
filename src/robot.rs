@@ -208,6 +208,27 @@ pub struct SerialSpec {
     #[serde(default = "default_bitrate")]
     pub baud: f64,
     pub motors: Vec<ServoSpec>,
+    /// An IMU board on the same bus, as the Microduck's.
+    #[serde(default)]
+    pub imu: Option<ImuSpec>,
+}
+
+/// The Microduck's IMU board (`dynamixel::imu`): its id, the site in the
+/// scene it senses the motion of, its frame in that site's (w, x, y, z),
+/// and its gyro's noise, rad/s.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ImuSpec {
+    pub id: u8,
+    pub site: String,
+    #[serde(default = "identity")]
+    pub mount: [f64; 4],
+    #[serde(default)]
+    pub noise: f64,
+}
+
+fn identity() -> [f64; 4] {
+    [1.0, 0.0, 0.0, 0.0]
 }
 
 /// The Dynamixel servos drydock simulates.
@@ -220,9 +241,16 @@ pub enum ServoModel {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ServoSpec {
-    pub joint: String,
+    /// None for a servo on no joint of the scene: it answers, and holds
+    /// where it's told.
+    #[serde(default)]
+    pub joint: Option<String>,
     pub model: ServoModel,
     pub id: u8,
+    /// What its EEPROM holds already, as the robot's servos are set up:
+    /// `shutdown: 52`, by rustypot's names.
+    #[serde(default)]
+    pub eeprom: std::collections::BTreeMap<String, i64>,
     /// Between the servo's horn and its joint, when they don't turn together.
     #[serde(default)]
     pub transmission: Transmission,
@@ -297,7 +325,7 @@ impl Robot {
     /// Every joint a motor or a servo drives, CAN buses first then serial,
     /// each in the file's order: how a scenario counts them.
     pub fn joints(&self) -> Vec<String> {
-        let servos = self.serial.iter().flat_map(|b| b.motors.iter().map(|m| m.joint.clone()));
+        let servos = self.serial.iter().flat_map(|b| b.motors.iter().filter_map(|m| m.joint.clone()));
         self.motors().map(|(_, m)| m.joint.clone()).chain(servos).collect()
     }
 
@@ -355,15 +383,29 @@ fn check_serial(bus: &SerialSpec) -> Result<(), String> {
     }
     let mut ids = Vec::new();
     for m in &bus.motors {
+        let name = format!("servo {}", m.id);
+        let name = m.joint.as_deref().unwrap_or(&name);
         if m.id > 252 {
-            return Err(format!("{}'s id {} isn't 0 to 252", m.joint, m.id));
+            return Err(format!("{name}'s id {} isn't 0 to 252", m.id));
         }
         if ids.contains(&m.id) {
-            return Err(format!("{}'s id {} is another servo's", m.joint, m.id));
+            return Err(format!("{name}'s id {} is another device's", m.id));
         }
         ids.push(m.id);
         if !m.transmission.ratio.is_finite() || m.transmission.ratio == 0.0 || !m.transmission.offset.is_finite() {
-            return Err(format!("{}: a transmission's ratio isn't zero", m.joint));
+            return Err(format!("{name}: a transmission's ratio isn't zero"));
+        }
+        for (item, &value) in &m.eeprom {
+            crate::dynamixel::xl330::eeprom(item, value).map_err(|e| format!("{name}: eeprom: {e}"))?;
+        }
+    }
+    if let Some(imu) = &bus.imu {
+        if ids.contains(&imu.id) || imu.id > 252 {
+            return Err(format!("the imu's id {} is another device's, or isn't 0 to 252", imu.id));
+        }
+        let n = imu.mount.iter().map(|x| x * x).sum::<f64>();
+        if !(n.is_finite() && n > 0.0 && imu.noise.is_finite() && imu.noise >= 0.0) {
+            return Err("the imu's mount is a quaternion (w, x, y, z), its noise zero or more".into());
         }
     }
     Ok(())

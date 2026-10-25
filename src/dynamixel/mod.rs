@@ -3,6 +3,7 @@
 //! servos on one bus (`bus`).
 
 pub mod bus;
+pub mod imu;
 pub mod protocol;
 pub mod xl330;
 

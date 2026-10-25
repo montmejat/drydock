@@ -162,6 +162,43 @@ const TABLE: &[Item] = &[
     item(147, 1, false, Ram, 0, (0, 1)),
 ];
 
+/// The EEPROM items a robot file may set, by the names rustypot gives them
+/// (`servo/dynamixel/xl330.rs`), and where they are. Id and baud rate come
+/// from the robot file's own fields.
+pub const EEPROM: &[(&str, u16)] = &[
+    ("return_delay_time", 9),
+    ("drive_mode", 10),
+    ("operating_mode", 11),
+    ("secondary_id", 12),
+    ("protocol_type", 13),
+    ("homing_offset", 20),
+    ("moving_threshold", 24),
+    ("temperature_limit", 31),
+    ("max_voltage_limit", 32),
+    ("min_voltage_limit", 34),
+    ("pwm_limit", 36),
+    ("current_limit", 38),
+    ("velocity_limit", 44),
+    ("max_position_limit", 48),
+    ("min_position_limit", 52),
+    ("startup_configuration", 60),
+    ("pwm_slope", 62),
+    ("shutdown", 63),
+];
+
+/// An EEPROM item's address and width, by name, if `value` is within its
+/// range.
+pub fn eeprom(name: &str, value: i64) -> Result<(u16, u16), String> {
+    let &(_, a) = EEPROM.iter().find(|(n, _)| *n == name).ok_or_else(|| {
+        format!("no EEPROM item `{name}`; there are {}", EEPROM.iter().map(|(n, _)| *n).collect::<Vec<_>>().join(", "))
+    })?;
+    let i = find(a).expect("in the table");
+    if !(i.range.0..=i.range.1).contains(&value) {
+        return Err(format!("{name} takes {} to {}, not {value}", i.range.0, i.range.1));
+    }
+    Ok((i.addr, i.size))
+}
+
 fn find(addr: u16) -> Option<&'static Item> {
     TABLE.iter().find(|i| (i.addr..i.addr + i.size).contains(&addr))
 }
@@ -285,6 +322,22 @@ impl Xl330 {
     /// The Baud Rate code it talks at.
     pub fn baud(&self) -> u8 {
         self.get(addr::BAUD_RATE) as u8
+    }
+
+    /// What its EEPROM holds already, as a robot's servos are set up: by
+    /// name, values [`eeprom`] took.
+    pub fn preset(&mut self, name: &str, value: i64) -> Result<(), String> {
+        let (a, size) = eeprom(name, value)?;
+        put(&mut self.table, a, size, value);
+        Ok(())
+    }
+
+    /// A step for a servo on no joint (the Microduck's mouth, which its
+    /// model leaves out): with torque on, its horn is where it's told.
+    pub fn idle(&mut self, now: f64, volts: f64) {
+        let goal = self.get(addr::GOAL_POSITION) as f64 - self.get(addr::HOMING_OFFSET) as f64;
+        let angle = if self.torque_enabled() { (goal - CENTRE) * RAD_PER_PULSE } else { self.angle };
+        self.step(now, angle, 0.0, volts, 0.0);
     }
 
     /// How long it waits before answering, seconds.

@@ -29,6 +29,8 @@ extern "C" {
     fn dd_v(w: *const Raw, dof: c_int) -> c_double;
     fn dd_set_force(w: *mut Raw, dof: c_int, f: c_double);
     fn dd_load_torque(w: *const Raw, dof: c_int) -> c_double;
+    fn dd_site(w: *const Raw, name: *const c_char, id: *mut c_int, err: *mut c_char, len: c_int) -> c_int;
+    fn dd_site_imu(w: *mut Raw, site: c_int, quat: *mut c_double, gyro: *mut c_double, accel: *mut c_double);
     fn dd_set_friction(w: *mut Raw, dof: c_int, frictionloss: c_double, damping: c_double);
     fn dd_step(w: *mut Raw);
 }
@@ -43,6 +45,22 @@ pub struct Joint {
     id: c_int,
     qpos: c_int,
     dof: c_int,
+}
+
+/// A site: a frame on a body, such as where an IMU sits.
+#[derive(Debug, Clone, Copy)]
+pub struct Site(c_int);
+
+/// What an IMU on a site senses, in the site's own frame but for its
+/// orientation, which is in the world's (z up).
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Inertial {
+    /// w, x, y, z.
+    pub quat: [f64; 4],
+    /// rad/s.
+    pub gyro: [f64; 3],
+    /// m/s², gravity included: +9.81 along up, at rest.
+    pub accel: [f64; 3],
 }
 
 /// Room for MuJoCo's messages.
@@ -81,6 +99,26 @@ impl World {
             return Err(message(&err));
         }
         Ok(Joint { id, qpos, dof })
+    }
+
+    pub fn site(&self, name: &str) -> Result<Site, String> {
+        let c_name = c_string(name)?;
+        let mut err = [0u8; ERR_LEN];
+        let mut id = 0;
+        // SAFETY: as in `load`.
+        let failed = unsafe { dd_site(self.raw, c_name.as_ptr(), &mut id, err.as_mut_ptr().cast(), ERR_LEN as c_int) };
+        if failed != 0 {
+            return Err(message(&err));
+        }
+        Ok(Site(id))
+    }
+
+    /// What an IMU on `site` senses, as of the last step.
+    pub fn inertial(&mut self, site: Site) -> Inertial {
+        let mut i = Inertial::default();
+        // SAFETY: as above; the arrays are the sizes the shim writes.
+        unsafe { dd_site_imu(self.raw, site.0, i.quat.as_mut_ptr(), i.gyro.as_mut_ptr(), i.accel.as_mut_ptr()) };
+        i
     }
 
     /// Silences the scene's own actuators on `joint`, and says how many.

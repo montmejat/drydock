@@ -106,5 +106,7 @@ MuJoCo frame by frame without a bus.
   heat, power and time; the sources.
 - [OpenArm](docs/openarm.md): OpenArm v1, driven by keel or by OpenArm's own
   library.
+- [Microduck](docs/microduck.md): Pollen's Microduck, its servos and IMU on
+  one serial bus, read by Pollen's own servo library.
 - [Design](docs/architecture.md): the pieces, how a frame and a step go
   through them, the decisions behind them and what's left to do.

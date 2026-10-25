@@ -2,6 +2,7 @@ use std::process::ExitCode;
 
 use drydock::can::Socket;
 use drydock::dock::Drydock;
+use drydock::dynamixel::bus::Device;
 use drydock::robot::Robot;
 use drydock::run::{self, BusTrace, Line, SerialLine};
 use drydock::scenario::Scenario;
@@ -115,8 +116,11 @@ fn main_() -> Result<(), String> {
     }
     for (b, bus) in robot.serial.iter().enumerate() {
         eprintln!("  {} (serial, {} Mbit/s, open it as the robot's serial port)", bus.port.display(), bus.baud / 1e6);
-        for s in dock.servos(b) {
-            eprintln!("    {:<22} id {}", s.joint, s.id());
+        for d in dock.devices(b) {
+            match d {
+                Device::Servo(s) => eprintln!("    {:<22} id {}", s.joint, s.id()),
+                Device::Imu(i) => eprintln!("    {:<22} id {}", "IMU", i.id()),
+            }
         }
     }
     if let Some(file) = &scenario {
