@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 use crate::can::timing::{Crossed, From, Rates, Timeline};
 use crate::can::{wait_any, Socket};
 use crate::dock::Drydock;
+use crate::scenario::{Change, Happening};
 
 /// Behind the wall clock by more than this, the simulation stops trying to
 /// catch up, and says so.
@@ -57,6 +58,22 @@ impl BusTrace {
         )
     }
 
+    /// A fault starting or ending, `at` on the run's clock (seconds).
+    fn write_happening(&mut self, joint: &str, h: &Happening, at: f64) -> io::Result<()> {
+        let ns = (self.base_ns + at * 1e9).round() as u64;
+        let what = match h.what {
+            Change::Breaks { until: Some(u) } => format!(r#""breaks","for_s":{}"#, u - h.at),
+            Change::Breaks { until: None } => r#""breaks""#.into(),
+            Change::Recovers => r#""recovers""#.into(),
+        };
+        writeln!(
+            self.out,
+            r#"{{"joint":"{joint}","fault":"{}","what":{what},"sim_s":{},"at_ns":{ns}}}"#,
+            h.fault.name(),
+            h.at
+        )
+    }
+
     /// Out to the file every tenth of a second: drydock ends when it's
     /// killed, and loses only that much.
     fn flush_now_and_then(&mut self, now: f64) -> io::Result<()> {
@@ -73,6 +90,26 @@ fn monotonic_ns() -> f64 {
     // SAFETY: writes into a local.
     unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) };
     ts.tv_sec as f64 * 1e9 + ts.tv_nsec as f64
+}
+
+/// What the scenario did since the last step, in the log, and in the trace
+/// if there's one (`at`: the run's clock, seconds).
+fn report(dock: &mut Drydock, trace: Option<&mut BusTrace>, at: f64) -> io::Result<()> {
+    let happenings = dock.happenings();
+    let mut trace = trace;
+    for h in &happenings {
+        let joint = dock.joint_name(h.motor).to_owned();
+        let what = match h.what {
+            Change::Breaks { until: Some(u) } => format!("breaks: {}, for {:.3} s", h.fault.name(), u - h.at),
+            Change::Breaks { until: None } => format!("breaks: {}", h.fault.name()),
+            Change::Recovers => format!("recovers from {}", h.fault.name()),
+        };
+        eprintln!("drydock: {:.3} s: {joint} {what}", h.at);
+        if let Some(t) = trace.as_deref_mut() {
+            t.write_happening(&joint, h, at)?;
+        }
+    }
+    Ok(())
 }
 
 /// In real time: a step of physics each timestep of the wall clock. A frame
@@ -133,6 +170,7 @@ pub fn realtime(mut dock: Drydock, lines: &[Line], mut trace: Option<BusTrace>) 
         dock.step();
         steps += 1;
         let now = seconds();
+        report(&mut dock, trace.as_mut(), now)?;
         if let Some(t) = &mut trace {
             t.flush_now_and_then(now)?;
         }
@@ -175,6 +213,7 @@ pub fn lockstep(mut dock: Drydock, lines: &[Line], period: f64) -> io::Result<()
                     for _ in 0..steps {
                         dock.step();
                     }
+                    report(&mut dock, None, 0.0)?;
                 }
             }
         }

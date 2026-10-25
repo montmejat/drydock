@@ -17,7 +17,7 @@ own software, unchanged.
 | | |
 |---|---|
 | **Real**: the same code as on the robot | the bus master and its driver library, its socket calls, its threads and timing on the host, its handling of every answer |
-| **Modelled**: real code paths, simulated input | each motor's firmware (answers, states, registers, timeout, MIT control law), its torque limit and transmission, its encoder's errors, its faults on a flag, the bus's timing (frame lengths, arbitration), the robot's mechanics (MuJoCo, from the robot's own MJCF) |
+| **Modelled**: real code paths, simulated input | each motor's firmware (answers, states, registers, timeout, MIT control law), its torque limit and transmission, its encoder's errors, its faults (from a scenario), the bus's timing (frame lengths, arbitration), the robot's mechanics (MuJoCo, from the robot's own MJCF) |
 | **Absent**: not exercised at all | the bus's electrical faults (error frames, bus-off), the motors' other modes, thermals, power |
 
 Most simulators draw the line higher: the robot's software talks to the
@@ -54,6 +54,7 @@ out.
 | `damiao::bus` | the motors on one bus: whose a frame is, CAN FD or classic, notes on what's ignored | timing, physics |
 | `drivetrain` | what a motor can give (peak torque), how its turning moves its joint (transmission), what it senses of it | protocols |
 | `effects` | an encoder's errors (delay, bias, drift, noise, counts), faults (dead, weak, frozen, noisy), a seeded generator | motors, protocols |
+| `scenario` | when faults start and end: at set times, or at random from a seed | what a fault does |
 | `world`, `shim/world.c` | MuJoCo: joints by name, their state, forces on them, stepping, keyframes, silencing the scene's own actuators | motors |
 | `dock` | the robot: each bus's motors, each motor's drivetrain and joint | sockets, clocks |
 | `robot` | the robot file | |
@@ -202,9 +203,13 @@ higher ids) goes. That is what a CAN controller with several transmit
 buffers does; one that sends a frame at a time, with gaps between, would let
 answers in between.
 
-**Faults are on a flag, and say nothing.** A motor breaks when the robot
-file or `--break` says, in simulated seconds, so a run that finds it
-repeats. A broken motor still reports itself enabled: a dead drive or a
+**Faults are a scenario's, and say nothing.** A scenario file, beside the
+robot file, says when motors break: at set times, to check a reaction, or
+at random, each fault at a mean interval and from its own seeded draws, so a
+run repeats and adding a fault moves no other. It's simulated time, so a
+lockstep run breaks the same frame every time. What drydock broke, and when,
+goes in its log and its trace: the answer key for a test, or for grading an
+agent. A broken motor still reports itself enabled: a dead drive or a
 frozen encoder doesn't announce itself on a real robot either, and noticing
 is the bus master's job, or its health checks'. Run against keel with the
 elbow dying at 2 s, the elbow drops to its stop within a second, and nothing

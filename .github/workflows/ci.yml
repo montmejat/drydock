@@ -65,18 +65,26 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       # The example arm on vcan0, driven by the example bus master for three
-      # seconds: every motor must answer, enabled.
+      # seconds: every motor must answer, enabled. Its shoulder dies at 1 s
+      # for 0.5 s, and drydock must say so.
       - name: A bus master drives drydock on vcan0
         run: |
-          sudo apt-get install -y -qq linux-modules-extra-$(uname -r)
-          sudo modprobe vcan
+          # vcan is in linux-modules-extra on GitHub's runners, which can take
+          # minutes to install: only when it isn't there already.
+          sudo modprobe vcan 2>/dev/null || {
+            sudo apt-get install -y -qq --no-install-recommends linux-modules-extra-$(uname -r)
+            sudo modprobe vcan
+          }
           sudo ip link add dev vcan0 type vcan
           sudo ip link set vcan0 mtu 72 up
           cargo build --release --bins --example wave
-          ./target/release/drydock examples/arm/robot.yml > drydock.log 2>&1 &
+          printf 'faults: [{ joint: shoulder, fault: dead, at: 1 s, lasts: 500 ms }]\n' > dies.scenario.yml
+          ./target/release/drydock examples/arm/robot.yml --scenario dies.scenario.yml > drydock.log 2>&1 &
           sleep 1
           ./target/release/examples/wave examples/arm/robot.yml --seconds 3 | tee wave.log
           kill %1 || true
           last=$(tail -n 1 wave.log)
           echo "$last" | grep -q silent && { echo "a motor didn't answer"; cat drydock.log; exit 1; }
           echo "$last" | grep -q '\[1\].*\[1\]' || { echo "a motor isn't enabled"; cat drydock.log; exit 1; }
+          grep -q 'shoulder breaks: dead, for 0.500 s' drydock.log || { echo "no fault reported"; cat drydock.log; exit 1; }
+          grep -q 'shoulder recovers from dead' drydock.log || { echo "no recovery reported"; cat drydock.log; exit 1; }

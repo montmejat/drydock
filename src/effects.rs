@@ -1,7 +1,7 @@
 //! What makes a simulated motor behave like a real one, beyond its firmware:
-//! an encoder that reads its angle imperfectly ([`Encoder`]), and the ways a
-//! motor breaks ([`Fault`]). Both are set per motor in the robot file, or on
-//! the command line (`--break joint:dead@10`).
+//! an encoder that reads its angle imperfectly ([`Encoder`]), set per motor
+//! in the robot file, and the ways a motor breaks ([`Breakdown`]), which a
+//! scenario says when (`scenario.rs`).
 //!
 //! The randomness is seeded: a lockstep run reads the same every time.
 //!
@@ -41,7 +41,8 @@ impl Rng {
 }
 
 /// How a motor breaks.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Breakdown {
     /// It gives no torque at all, whatever its firmware asks.
     Dead,
@@ -54,44 +55,14 @@ pub enum Breakdown {
     Noisy,
 }
 
-/// A motor breaking, some seconds into the simulation.
-#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
-#[serde(try_from = "String")]
-pub struct Fault {
-    pub what: Breakdown,
-    /// Simulated seconds.
-    pub after_s: f64,
-}
-
-impl Fault {
-    /// `what` after `after_s` seconds: `dead`, `freeze@10`.
-    pub fn parse(s: &str) -> Result<Fault, String> {
-        let (what, after) = s.split_once('@').unwrap_or((s, "0"));
-        let what = match what {
-            "dead" => Breakdown::Dead,
-            "weak" => Breakdown::Weak,
-            "freeze" => Breakdown::Freeze,
-            "noisy" => Breakdown::Noisy,
-            other => return Err(format!("no fault {other:?}: dead, weak, freeze or noisy")),
-        };
-        let after_s: f64 = after.parse().map_err(|_| format!("{s:?}: seconds after `@`"))?;
-        if after_s.is_nan() || after_s < 0.0 {
-            return Err(format!("{s:?}: seconds after `@`, zero or more"));
+impl Breakdown {
+    pub fn name(self) -> &'static str {
+        match self {
+            Breakdown::Dead => "dead",
+            Breakdown::Weak => "weak",
+            Breakdown::Freeze => "freeze",
+            Breakdown::Noisy => "noisy",
         }
-        Ok(Fault { what, after_s })
-    }
-
-    /// What has broken by `now`, if anything.
-    pub fn at(fault: Option<Fault>, now: f64) -> Option<Breakdown> {
-        fault.filter(|f| now >= f.after_s).map(|f| f.what)
-    }
-}
-
-impl TryFrom<String> for Fault {
-    type Error = String;
-
-    fn try_from(s: String) -> Result<Fault, String> {
-        Fault::parse(&s)
     }
 }
 
@@ -220,13 +191,9 @@ mod tests {
     }
 
     #[test]
-    fn faults_parse_and_happen_on_time() {
-        let f = Fault::parse("weak@2.5").unwrap();
-        assert_eq!(f, Fault { what: Breakdown::Weak, after_s: 2.5 });
-        assert_eq!(Fault::at(Some(f), 2.0), None);
-        assert_eq!(Fault::at(Some(f), 2.5), Some(Breakdown::Weak));
-        assert_eq!(torque(3.0, Fault::at(Some(f), 3.0)), 0.6000000000000001);
-        assert_eq!(Fault::parse("dead").unwrap().after_s, 0.0);
-        assert!(Fault::parse("dark").is_err() && Fault::parse("dead@soon").is_err());
+    fn a_dead_motor_gives_nothing_and_a_weak_one_a_fifth() {
+        assert_eq!(torque(3.0, Some(Breakdown::Dead)), 0.0);
+        assert!((torque(3.0, Some(Breakdown::Weak)) - 0.6).abs() < 1e-12);
+        assert_eq!(torque(3.0, Some(Breakdown::Freeze)), 3.0);
     }
 }

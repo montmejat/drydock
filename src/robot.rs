@@ -17,8 +17,8 @@
 //!       - { joint: elbow, model: DM4310, id: 0x02, master_id: 0x12, peak_torque: 7, timeout_ms: 100 }
 //!       # A gripper: the motor's angle moves a finger along a slide.
 //!       - { joint: finger, model: DM4310, id: 0x08, master_id: 0x18, transmission: { ratio: 0.042, offset: 0.044 } }
-//!       # An imperfect encoder, and a motor that dies ten seconds in.
-//!       - { joint: wrist, model: DM4310, id: 0x03, master_id: 0x13, encoder: { noise: 0.0005, quantum: 0.0004 }, fault: dead@10 }
+//!       # An imperfect encoder. When motors break is a scenario's (`scenario.rs`).
+//!       - { joint: wrist, model: DM4310, id: 0x03, master_id: 0x13, encoder: { noise: 0.0005, quantum: 0.0004 } }
 //! seed: 0                     # optional: for the encoders' noise
 //! ```
 
@@ -31,7 +31,7 @@ use serde::Deserialize;
 use crate::can::timing::Rates;
 use crate::damiao::{Limits, Model, REGISTER_ID};
 use crate::drivetrain::Transmission;
-use crate::effects::{EncoderSettings, Fault};
+use crate::effects::EncoderSettings;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -172,10 +172,6 @@ pub struct MotorSpec {
     /// What its encoder gets wrong: perfect by default.
     #[serde(default)]
     pub encoder: EncoderSettings,
-    /// How and when it breaks: `dead`, `weak`, `freeze`, `noisy`, `@`
-    /// seconds into the simulation.
-    #[serde(default)]
-    pub fault: Option<Fault>,
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize)]
@@ -214,16 +210,6 @@ impl Robot {
             Scene::File(path) => Ok(self.dir.join(path)),
             Scene::Git { git, commit, file } => Ok(fetch(git, commit, file)?.join(file)),
         }
-    }
-
-    /// Breaks the motor on `joint`: `--break joint:dead@10`.
-    pub fn break_motor(&mut self, arg: &str) -> Result<(), String> {
-        let (joint, fault) =
-            arg.rsplit_once(':').ok_or_else(|| format!("--break {arg}: joint:fault, as elbow:dead@10"))?;
-        let fault = Fault::parse(fault)?;
-        let motor = self.buses.iter_mut().flat_map(|b| &mut b.motors).find(|m| m.joint == joint);
-        motor.ok_or_else(|| format!("--break: no motor drives {joint}"))?.fault = Some(fault);
-        Ok(())
     }
 
     /// Every motor, with its bus.

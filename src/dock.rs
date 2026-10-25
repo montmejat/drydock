@@ -9,11 +9,15 @@ use crate::damiao::motor::Motor;
 use crate::drivetrain::{Actuator, Drivetrain};
 use crate::effects::Encoder;
 use crate::robot::Robot;
+use crate::scenario::{Change, Happening, Scenario};
 use crate::world::World;
 
 pub struct Drydock {
     world: World,
     buses: Vec<Bus>,
+    scenario: Option<Scenario>,
+    /// What the scenario did, not yet asked for.
+    happened: Vec<Happening>,
 }
 
 /// One bus's motors, and their ways to their joints.
@@ -44,12 +48,66 @@ impl Drydock {
                 // Each motor's own noise, the same every run.
                 let seed = robot.seed ^ (((b as u64) << 32) | (i as u64 + 1));
                 let encoder = Encoder::new(m.encoder, seed);
-                drivetrains.push(Drivetrain { joint, actuator, transmission: m.transmission, encoder, fault: m.fault });
+                drivetrains.push(Drivetrain {
+                    joint,
+                    actuator,
+                    transmission: m.transmission,
+                    encoder,
+                    faults: Vec::new(),
+                });
             }
             let heard = vec![false; motors.len()];
             buses.push(Bus { motors: Motors::new(motors, spec.fd), drivetrains, heard });
         }
-        Ok(Self { world, buses })
+        Ok(Self { world, buses, scenario: None, happened: Vec::new() })
+    }
+
+    /// What happens to the robot as time passes.
+    pub fn set_scenario(&mut self, scenario: Scenario) {
+        self.scenario = Some(scenario);
+    }
+
+    /// What broke and recovered since this was last asked, in order.
+    pub fn happenings(&mut self) -> Vec<Happening> {
+        std::mem::take(&mut self.happened)
+    }
+
+    /// The motors' joints, counted across buses as a scenario counts them.
+    pub fn joint_name(&self, motor: usize) -> &str {
+        let (b, i) = self.locate(motor);
+        &self.buses[b].motors.motors()[i].joint
+    }
+
+    fn locate(&self, mut motor: usize) -> (usize, usize) {
+        for (b, bus) in self.buses.iter().enumerate() {
+            if motor < bus.drivetrains.len() {
+                return (b, motor);
+            }
+            motor -= bus.drivetrains.len();
+        }
+        panic!("no motor {motor}")
+    }
+
+    /// The scenario's faults that start or end by `now`.
+    fn faults(&mut self, now: f64) {
+        let count = self.buses.iter().map(|b| b.drivetrains.len()).sum();
+        let mut motor = 0;
+        for b in &mut self.buses {
+            for d in &mut b.drivetrains {
+                for fault in d.recover(now) {
+                    self.happened.push(Happening { at: now, motor, fault, what: Change::Recovers });
+                }
+                motor += 1;
+            }
+        }
+        let due = self.scenario.as_mut().map(|s| s.due(now, count)).unwrap_or_default();
+        for h in due {
+            let (b, i) = self.locate(h.motor);
+            if let Change::Breaks { until } = h.what {
+                self.buses[b].drivetrains[i].faults.push((h.fault, until));
+            }
+            self.happened.push(Happening { at: now, ..h });
+        }
     }
 
     /// Bus `bus`'s motors, in the robot file's order.
@@ -89,12 +147,13 @@ impl Drydock {
     /// One step of physics, under the torques the motors give now.
     pub fn step(&mut self) {
         let now = self.world.time();
+        self.faults(now);
         for b in &mut self.buses {
             for (i, d) in b.drivetrains.iter_mut().enumerate() {
                 let (q, v) = self.world.state(d.joint);
                 let (theta, omega) = d.sense(now, q, v);
                 let motor = b.motors.motor_mut(i);
-                let torque = d.torque(now, motor.law(now, theta, omega));
+                let torque = d.torque(motor.law(now, theta, omega));
                 motor.applied(torque);
                 self.world.set_force(d.joint, d.transmission.to_joint(torque));
             }

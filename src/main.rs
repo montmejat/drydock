@@ -4,19 +4,20 @@ use drydock::can::Socket;
 use drydock::dock::Drydock;
 use drydock::robot::Robot;
 use drydock::run::{self, BusTrace, Line};
+use drydock::scenario::Scenario;
 
 const USAGE: &str = "\
 drydock: a robot's motors on virtual CAN buses, simulated in MuJoCo
 
-usage: drydock <robot.yml> [--lockstep <hz>] [--break <joint>:<fault>]... [--trace <file>]
+usage: drydock <robot.yml> [--scenario <file>] [--lockstep <hz>] [--trace <file>]
 
-  --lockstep <hz>          step 1/hz seconds of physics each time every motor
-                           has had a frame, instead of following the wall clock
-  --break <joint>:<fault>  break the motor on <joint>: dead, weak, freeze or
-                           noisy, now or @ seconds into the simulation
-                           (elbow:freeze@10)
-  --trace <file>           write every frame that crosses a bus, with when it
-                           was ready, started across and arrived (real time)";
+  --scenario <file>  what happens to the robot: motors breaking, at set times
+                     or at random (see examples/openarm/*.scenario.yml)
+  --lockstep <hz>    step 1/hz seconds of physics each time every motor has
+                     had a frame, instead of following the wall clock
+  --trace <file>     write every frame that crosses a bus, with when it was
+                     ready, started across and arrived, and every fault as it
+                     starts and ends (real time)";
 
 fn main() -> ExitCode {
     match main_() {
@@ -30,7 +31,7 @@ fn main() -> ExitCode {
 
 fn main_() -> Result<(), String> {
     let mut args = std::env::args().skip(1);
-    let (mut path, mut lockstep, mut breaks, mut trace) = (None, None, Vec::new(), None);
+    let (mut path, mut lockstep, mut scenario, mut trace) = (None, None, None, None);
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "-h" | "--help" => {
@@ -45,7 +46,7 @@ fn main_() -> Result<(), String> {
                 }
                 lockstep = Some(hz);
             }
-            "--break" => breaks.push(args.next().ok_or("--break needs joint:fault")?),
+            "--scenario" => scenario = Some(args.next().ok_or("--scenario needs a file")?),
             "--trace" => trace = Some(args.next().ok_or("--trace needs a file")?),
             _ if arg.starts_with('-') => return Err(format!("no option {arg}\n\n{USAGE}")),
             _ if path.is_none() => path = Some(arg),
@@ -57,11 +58,12 @@ fn main_() -> Result<(), String> {
         return Err("--trace records how long frames take on the bus, which only happens in real time".into());
     }
     let trace = trace.map(|t| BusTrace::create(t.as_ref()).map_err(|e| format!("can't write {t}: {e}"))).transpose()?;
-    let mut robot = Robot::load(&path)?;
-    for b in &breaks {
-        robot.break_motor(b)?;
+    let robot = Robot::load(&path)?;
+    let mut dock = Drydock::load(&robot)?;
+    if let Some(file) = &scenario {
+        let joints: Vec<String> = robot.motors().map(|(_, m)| m.joint.clone()).collect();
+        dock.set_scenario(Scenario::load(file, &joints)?);
     }
-    let dock = Drydock::load(&robot)?;
     if let Some(hz) = lockstep {
         run::steps_per_period(dock.timestep(), 1.0 / hz)?;
     }
@@ -94,19 +96,12 @@ fn main_() -> Result<(), String> {
             false => format!("classic CAN, {} Mbit/s", bus.bitrate / 1e6),
         };
         eprintln!("  {} ({kind})", bus.can);
-        for (i, (m, spec)) in dock.motors(b).iter().zip(&bus.motors).enumerate() {
-            let fault = match spec.fault {
-                Some(f) => format!("  breaks: {:?} at {} s", f.what, f.after_s).to_lowercase(),
-                None => String::new(),
-            };
-            eprintln!(
-                "    {:<22} {:#05x} -> {:#05x}  peak {} N m{fault}",
-                m.joint,
-                m.id,
-                m.master_id,
-                dock.peak_torque(b, i)
-            );
+        for (i, m) in dock.motors(b).iter().enumerate() {
+            eprintln!("    {:<22} {:#05x} -> {:#05x}  peak {} N m", m.joint, m.id, m.master_id, dock.peak_torque(b, i));
         }
+    }
+    if let Some(file) = &scenario {
+        eprintln!("drydock: what happens to it: {file}");
     }
     let result = match lockstep {
         Some(hz) => run::lockstep(dock, &lines, 1.0 / hz),
