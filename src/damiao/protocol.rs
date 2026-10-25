@@ -228,6 +228,15 @@ impl Model {
         };
         Limits { p, v, t }
     }
+
+    /// What it runs on, V: 48 for the models named so, and for the
+    /// DM-J10010L, which is sold at 48 V; 24 for the others.
+    pub fn volts(self) -> f64 {
+        match self {
+            Model::DM4310_48V | Model::DM4340_48V | Model::DM10010L => 48.0,
+            _ => 24.0,
+        }
+    }
 }
 
 fn to_uint(x: f32, min: f32, max: f32, bits: u32) -> u16 {

@@ -11,8 +11,9 @@ drydock: a robot's motors on virtual CAN buses, simulated in MuJoCo
 
 usage: drydock <robot.yml> [--scenario <file>] [--lockstep <hz>] [--trace <file>]
 
-  --scenario <file>  what happens to the robot: motors breaking, at set times
-                     or at random (see examples/openarm/*.scenario.yml)
+  --scenario <file>  what happens to the robot: motors breaking, the supply
+                     failing, at set times or at random
+                     (see examples/openarm/*.scenario.yml)
   --lockstep <hz>    step 1/hz seconds of physics each time every motor has
                      had a frame, instead of following the wall clock
   --trace <file>     write every frame that crosses a bus, with when it was

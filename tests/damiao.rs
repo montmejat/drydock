@@ -6,7 +6,7 @@
 //! more than drydock does.
 //!
 //! Names start with what they're about: `mit_`, `special_` (enable,
-//! disable, zero, clear an error), `register_`, `status_`, `bus_`. Features come from Damiao's manual and their reference
+//! disable, zero, clear an error), `register_`, `status_`, `power_`, `bus_`. Features come from Damiao's manual and their reference
 //! driver (`DM_CAN.py`).
 
 use drydock::can::timing::{bits, Crossed, From, Rates, Timeline};
@@ -443,9 +443,72 @@ fn status_overheating_stops_the_motor_until_it_cools_and_is_cleared() {
     assert_eq!(again.status, status::MOS_OVERTEMPERATURE, "{again:?}");
 }
 
+/// The slide's motor's status, asked with a refresh.
+fn status_of(dock: &mut Drydock) -> u8 {
+    let f = send(dock, 0x7FF, Register::Refresh { motor: ID }.encode()).expect("an answer");
+    Feedback::decode(&f.eight().unwrap(), slide().1).status
+}
+
 #[test]
-#[ignore = "not simulated: no power supply, so overvoltage, undervoltage, overcurrent and overload are never reported"]
-fn status_electrical_faults() {}
+fn status_undervoltage_when_the_supply_sags_below_uv_value() {
+    let (mut dock, _) = slide_with("faults: [{ supply: 12 V, at: 0.1 s, lasts: 0.1 s }]");
+    assert_eq!(f32::from_le_bytes(read(&mut dock, reg::UV_VALUE)), 15.0);
+    send(&mut dock, ID, Special::Enable.encode());
+    steps(&mut dock, 0.15);
+    assert_eq!(status_of(&mut dock), status::UNDERVOLTAGE);
+    // Back to 24 V, it stays stopped until cleared.
+    steps(&mut dock, 0.1);
+    assert_eq!(status_of(&mut dock), status::UNDERVOLTAGE);
+    send(&mut dock, ID, Special::ClearError.encode());
+    send(&mut dock, ID, Special::Enable.encode());
+    steps(&mut dock, 0.01);
+    assert_eq!(status_of(&mut dock), status::ENABLED);
+}
+
+#[test]
+fn status_overvoltage_when_the_supply_rises_above_ov_value() {
+    let (mut dock, _) = slide_with("faults: [{ supply: 36 V, at: 0.1 s }]");
+    // A 24 V motor: the most Damiao's manual recommends, 32 V.
+    assert_eq!(f32::from_le_bytes(read(&mut dock, reg::OV_VALUE)), 32.0);
+    write(&mut dock, reg::OV_VALUE, 40.0f32.to_le_bytes());
+    send(&mut dock, ID, Special::Enable.encode());
+    steps(&mut dock, 0.15);
+    assert_eq!(status_of(&mut dock), status::ENABLED, "36 V, under 40");
+    write(&mut dock, reg::OV_VALUE, 32.0f32.to_le_bytes());
+    steps(&mut dock, 0.01);
+    assert_eq!(status_of(&mut dock), status::OVERVOLTAGE);
+}
+
+#[test]
+fn status_overcurrent_when_a_phase_is_shorted() {
+    let (mut dock, limits) = slide_with("faults: [{ joint: slide, fault: shorted, at: 0 s }]");
+    send(&mut dock, ID, Special::Enable.encode());
+    steps(&mut dock, 0.01);
+    assert_eq!(status_of(&mut dock), status::ENABLED, "enabled, it isn't driving yet");
+    let f = hold(&mut dock, torque(1.0, limits), 0.01, limits);
+    assert_eq!(f.status, status::OVERCURRENT);
+    assert!(f.t.abs() <= 2.0 * limits.t / 4095.0, "no torque: {f:?}");
+}
+
+#[test]
+#[ignore = "not simulated: Damiao's sources don't say what trips overload (E)"]
+fn status_overload() {}
+
+#[test]
+fn power_off_the_motors_fall_silent_then_start_from_what_they_saved() {
+    let (mut dock, _) = slide_with("faults: [{ supply: off, at: 0.1 s, lasts: 0.1 s }]");
+    write(&mut dock, reg::VMAX, 20.0f32.to_le_bytes());
+    send(&mut dock, 0x7FF, Register::Save { motor: ID }.encode()).expect("saved");
+    write(&mut dock, reg::PMAX, 5.0f32.to_le_bytes());
+    send(&mut dock, ID, Special::Enable.encode());
+    steps(&mut dock, 0.15);
+    assert!(send(&mut dock, 0x7FF, Register::Refresh { motor: ID }.encode()).is_none(), "off");
+    steps(&mut dock, 0.1);
+    let f = send(&mut dock, 0x7FF, Register::Refresh { motor: ID }.encode()).expect("back on");
+    assert_eq!(f.data[0] >> 4, status::DISABLED);
+    assert_eq!(f32::from_le_bytes(read(&mut dock, reg::VMAX)), 20.0, "saved");
+    assert_eq!(f32::from_le_bytes(read(&mut dock, reg::PMAX)), 12.5, "not saved: the factory's");
+}
 
 #[test]
 fn bus_bit_rate_register_answered_then_deaf_at_another_rate() {

@@ -17,8 +17,8 @@ own software, unchanged.
 | | |
 |---|---|
 | **Real**: the same code as on the robot | the bus master and its driver library, its socket calls, its threads and timing on the host, its handling of every answer |
-| **Modelled**: real code paths, simulated input | each motor's firmware (answers, states, registers, timeout, MIT control law), its torque limit and transmission, its encoder's errors, its faults (from a scenario), the bus's timing (frame lengths, arbitration), the robot's mechanics (MuJoCo, from the robot's own MJCF) |
-| **Absent**: not exercised at all | the bus's electrical faults (error frames, retransmissions, bus-off: a lost frame is just lost), power |
+| **Modelled**: real code paths, simulated input | each motor's firmware (answers, states, registers, timeout, MIT control law), its torque limit and transmission, its encoder's errors, its heat, its faults (from a scenario), the supply it runs on, the bus's timing (frame lengths, arbitration), the robot's mechanics (MuJoCo, from the robot's own MJCF) |
+| **Absent**: not exercised at all | the bus's electrical faults (error frames, retransmissions, bus-off: a lost frame is just lost) |
 
 Most simulators draw the line higher: the robot's software talks to the
 simulator through an adapter of its own (a Python API, a TCP protocol), and
@@ -54,10 +54,11 @@ out.
 | `damiao::bus` | the motors on one bus: whose a frame is, CAN FD or classic, notes on what's ignored | timing, physics |
 | `drivetrain` | what a motor can give (peak torque), how its turning moves its joint (transmission), what it senses of it | protocols |
 | `thermal` | how hot a motor's coil and drive get, from the torque it gives | when the motor trips: its firmware's |
-| `effects` | an encoder's errors (delay, bias, drift, noise, counts), faults (dead, weak, frozen, noisy), a seeded generator | motors, protocols |
-| `scenario` | when faults start and end: at set times, or at random from a seed | what a fault does |
+| `power` | the supply: what the motors draw and give back, the bus's voltage | when the motor trips: its firmware's |
+| `effects` | an encoder's errors (delay, bias, drift, noise, counts), how a motor breaks, a seeded generator | motors, protocols |
+| `scenario` | when faults start and end, to a motor or the supply: at set times, or at random from a seed | what a fault does |
 | `world`, `shim/world.c` | MuJoCo: joints by name, their state, forces on them, stepping, keyframes, silencing the scene's own actuators | motors |
-| `dock` | the robot: each bus's motors, each motor's drivetrain and joint | sockets, clocks |
+| `dock` | the robot: each bus's motors, each motor's drivetrain and joint, the supply | sockets, clocks |
 | `robot` | the robot file | |
 
 `damiao::protocol` serves both sides: the `wave` example uses it to talk to
@@ -219,6 +220,15 @@ the rated torque, at its own pace, and the firmware trips at its `OT_Value`.
 The rises and time constants are chosen so that rated torque runs forever
 and peak torque trips the drive in seconds; the README lists them as
 assumptions. A better source replaces them; nothing else changes.
+
+**Power is derived too.** The supply is ideal unless the robot file
+describes one: then it sags through its wires as the motors draw, and can't
+take back what they give braking, which charges the bus's capacitors. That
+is the simplest model where both a brownout and a hard stop on a bench
+supply trip what they trip on a real robot. A motor's coil losses, its idle
+draw and its capacitance aren't published; the README names the three
+assumptions. The thresholds are the motor's `UV_Value` and `OV_Value`,
+started at what Damiao's manual recommends.
 
 **Faults are a scenario's, and say nothing.** A scenario file, beside the
 robot file, says when motors break: at set times, to check a reaction, or

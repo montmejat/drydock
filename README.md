@@ -126,6 +126,7 @@ buses:
       - { joint: elbow, model: DM4310, id: 0x02, master_id: 0x12, peak_torque: 7, timeout_ms: 100 }
       - { joint: finger, model: DM4310, id: 0x08, master_id: 0x18, transmission: { ratio: 0.042, offset: 0.044 } }
       - { joint: wrist, model: DM4310, id: 0x03, master_id: 0x13, encoder: { noise: 0.0005, quantum: 0.0004 } }
+power: { volts: 24, ohms: 0.1 }  # optional: a bench supply, through its wires (see Power)
 seed: 0                     # optional: for the encoders' noise
 ```
 
@@ -189,6 +190,9 @@ faults:
     fault: freeze
     every: 60 s
     lasts: 0.5 s            # then it recovers; without it, it doesn't
+  - supply: off             # the motors' supply: off, or a voltage (`18 V`)
+    at: 20 s
+    lasts: 1 s
 ```
 
 ```sh
@@ -200,13 +204,17 @@ drydock examples/openarm/robot.yml --scenario examples/openarm/elbow-dies.scenar
   `overheat` (it has lost most of its cooling: it heats five times as fast),
   `disconnected` (a loose connector: it neither hears frames nor answers,
   and goes on with its last command until its timeout, if it has one),
-  `lossy` (about one frame in ten lost, each way). Faults add up: a dead
+  `lossy` (about one frame in ten lost, each way), `shorted` (a phase
+  shorted: as soon as it drives, it stops with over-current). Faults add up: a dead
   motor that's also disconnected is still dead. A broken motor still says
   it's enabled until its firmware has something to say (an overheated one
   does): finding out is the bus master's job.
 - `at` or `every`: when. `every` is the mean time between two, at random
   (any moment as likely as the next). In simulated time: `s` or `ms`.
 - `joint`: one of the robot's, or `any`, drawn each time.
+- `supply`: instead of a joint and its fault, the supply goes `off`, or to
+  a voltage: a brownout (`12 V`), or a supply set too high (`36 V`). The
+  latest one in force wins.
 - `lasts`: how long until it recovers. Without it, it doesn't.
 - `seed`: random faults are drawn from it, each fault from its own draws, so
   a run repeats, and adding a fault leaves the others' times as they were.
@@ -216,6 +224,7 @@ it. It says so as it happens:
 
 ```
 drydock: 6.000 s: openarm_joint4 breaks: dead
+drydock: 15.000 s: the supply goes off, for 0.500 s
 ```
 
 and with `--trace`, as a line of the trace, on the clock of the frames
@@ -223,6 +232,7 @@ around it:
 
 ```
 {"joint":"openarm_joint4","fault":"dead","what":"breaks","sim_s":6,"at_ns":180650934766604}
+{"supply_v":0,"what":"breaks","for_s":0.5,"sim_s":15,"at_ns":180659934766604}
 ```
 
 ## What's simulated
@@ -241,6 +251,9 @@ one per feature, and so is every gap: CI turns them into a table on each
 | Enable `FC`, disable `FD`, zero `FE`, clear error `FB` | each answered with feedback; enabling starts from no command; a motor in error stays in it until cleared |
 | Feedback, on `master_id` | after every frame, as the real motors answer: status, id, position, velocity, torque, and the drive's and coil's temperatures |
 | Over-temperature | past `OT_Value` (120 °C), status `B` (the drive) or `C` (the coil) and no torque, until cleared; see Heat |
+| Under- and overvoltage | enabled, below `UV_Value` (15 V) or above `OV_Value` (32 V, or 52 V for a 48 V motor), status `9` or `8`, until cleared; see Power |
+| Over-current | a `shorted` motor, as soon as it drives: status `A`, until cleared |
+| Power off and on | below 10 V a motor neither hears nor answers; back, it starts disabled, from the registers it last saved |
 | Registers, through `0x7FF` | every register in Damiao's table, read and written within its range; a refused write answers with the value kept; refresh (`CC`) answers with feedback; save (`AA`) answers done, while disabled |
 | Ids, `ESC_ID` and `MST_ID` | a new id takes effect at once: commands go to it, answers come from the new master id |
 | Timeout, `TIMEOUT` | in 50 µs; 0 for none |
@@ -262,8 +275,9 @@ Not yet, or not at all:
   answer with it, but nothing changes: the other modes' gains among them.
 - **Two motors on one id.** A write of another motor's `ESC_ID` is refused,
   with a note: on a real bus both motors would take its frames.
-- **No power supply.** Overvoltage, undervoltage, overcurrent and overload
-  are never reported.
+- **Overload** (status `E`) is never reported: Damiao's sources don't say
+  what trips it. `OC_Value` is kept, but over-current comes only from a
+  `shorted` fault: the sources don't say what current it's a share of.
 - **A lost frame is just lost.** On a real bus a corrupted frame is caught
   by its CRC, flagged with an error frame and sent again, and a node that
   errs too often goes bus-off. drydock's link faults lose frames outright,
@@ -297,6 +311,41 @@ A motor's rated torque defaults to a third of its peak. Where resellers
 publish ratings, that's within a tenth of them: about 3 N m for a DM-J4310,
 9 for a DM-J4340, 20 for a DM-J8009. `rated_torque` in the robot file sets
 it.
+
+## Power
+
+Without `power` in the robot file, the motors run from an ideal 24 V
+supply: it never sags, and takes back what braking motors give, as a large
+battery would. With it, they run from a bench supply set to `volts`,
+through `ohms` of wiring (there and back, none by default):
+
+- It **sags** as the motors draw: each draws what it gives its joint
+  (torque × speed), what its coil loses as heat, and what its electronics
+  need.
+- It **can't take current back.** A motor braking gives back what it takes
+  from its joint, and that charges the capacitors across the bus until
+  something draws it. Swing the example arm fast on 24 V and brake, and the
+  bus passes 32 V: both motors stop with overvoltage.
+
+| | per motor | |
+|---|---|---|
+| coil losses | 1 W per N m of rated torque, at rated torque, going as the torque squared | assumed |
+| electronics | 1 W | assumed |
+| capacitance | 470 µF | assumed |
+
+Damiao doesn't publish these, so they are **assumptions**, about what small
+drives of this size have. What the motors do with the voltage is their
+firmware's: below `UV_Value` or above `OV_Value`, while enabled, a motor
+stops with status `9` or `8` and gives no torque until the error is cleared.
+Damiao's manual recommends at least 15 V and at most 32 V (52 V for a 48 V
+motor, by the model's name, and the DM-J10010L), and their factory values
+aren't published, so drydock's motors start there. Below 10 V, the least
+`UV_Value` takes, a motor is off (assumed): it neither hears nor answers,
+and comes back disabled, from the registers it last saved (`AA`), its zero
+kept.
+
+A scenario sets the supply (`supply: off`, `supply: 12 V`) as it breaks a
+motor; `examples/openarm/power-cut.scenario.yml` browns it out, then cuts it.
 
 ## Time
 
@@ -342,7 +391,8 @@ the others complete.
 | `src/damiao/` | `protocol.rs`, the frames; `motor.rs`, one motor's firmware; `bus.rs`, the motors on one bus |
 | `src/drivetrain.rs` | what limits a motor's torque, how it moves its joint, what it senses |
 | `src/effects.rs` | an imperfect encoder, and how a motor breaks |
-| `src/scenario.rs` | when motors break: at set times, or at random |
+| `src/thermal.rs`, `src/power.rs` | how hot a motor gets; the supply it runs on |
+| `src/scenario.rs` | when motors break, or the supply: at set times, or at random |
 | `src/world.rs`, `shim/world.c` | MuJoCo, through a small C shim, so Rust mirrors none of its structs |
 | `src/dock.rs` | the robot: buses of motors on the world's joints |
 | `src/robot.rs` | the robot file |
@@ -358,6 +408,7 @@ the special frames, registers and the factory ranges. OpenArm's
 Enactic's copy of Damiao's manual for the DM-J4340P-2EC
 ([damiao.enactic.ai](https://damiao.enactic.ai/en/products/hardware/dm-j4340p-2ec-v1.0/))
 gives the register table with each register's range, the bit-rate codes,
-and the save's answer. The `TIMEOUT` register's unit, 50 µs, is from the
+the save's answer, and the voltages and temperatures it recommends
+protecting at. The `TIMEOUT` register's unit, 50 µs, is from the
 [damiao-motor](https://damiao-motor.jia-xie.com/concept/registers/) Python
 driver's documentation; Damiao's own doesn't say.

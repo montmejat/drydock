@@ -62,6 +62,9 @@ pub enum Breakdown {
     Disconnected,
     /// Its link loses frames: about one in ten, each way.
     Lossy,
+    /// A phase shorted: as soon as it drives, its current runs away, and
+    /// its firmware stops it with an over-current error.
+    Shorted,
 }
 
 impl Breakdown {
@@ -74,6 +77,7 @@ impl Breakdown {
             Breakdown::Overheat => "overheat",
             Breakdown::Disconnected => "disconnected",
             Breakdown::Lossy => "lossy",
+            Breakdown::Shorted => "shorted",
         }
     }
 }

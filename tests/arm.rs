@@ -3,9 +3,10 @@
 use drydock::can::Frame;
 use drydock::damiao::{reg, status, Feedback, Mit, Register, RegisterReply, Special};
 use drydock::dock::Drydock;
+use drydock::power::PowerSpec;
 use drydock::robot::Robot;
 use drydock::run::steps_per_period;
-use drydock::scenario::{Change, Scenario};
+use drydock::scenario::{Change, Fault, Scenario};
 
 const SHOULDER: u16 = 0x01;
 const ELBOW: u16 = 0x02;
@@ -175,7 +176,8 @@ fn a_fault_that_lasts_ends_and_says_when() {
     assert_eq!(happened.len(), 2, "{happened:?}");
     assert!(matches!(happened[0].what, Change::Breaks { .. }) && (happened[0].at - 0.5).abs() < 1e-3, "{happened:?}");
     assert!(happened[1].what == Change::Recovers && (happened[1].at - 0.8).abs() < 1e-3, "{happened:?}");
-    assert_eq!(dock.joint_name(happened[0].motor), "shoulder");
+    let Fault::Motor { motor, .. } = happened[0].fault else { panic!("{happened:?}") };
+    assert_eq!(dock.joint_name(motor), "shoulder");
 }
 
 #[test]
@@ -230,4 +232,31 @@ fn noisy_encoders_repeat_with_their_seed() {
     };
     assert_eq!(run(0.002), run(0.002));
     assert_ne!(run(0.002), run(0.0));
+}
+
+/// The arm swung up 1.2 rad, fast, on a supply: its motors' statuses, and
+/// the most the bus's voltage reached.
+fn swing(power: Option<PowerSpec>) -> (Vec<u8>, f64) {
+    let mut robot = Robot::load(concat!(env!("CARGO_MANIFEST_DIR"), "/examples/arm/robot.yml")).unwrap();
+    robot.power = power;
+    let mut dock = Drydock::load(&robot).unwrap();
+    cycle(&mut dock, &enable(&robot), 0.001);
+    let (mut answers, mut most) = (Vec::new(), 0.0f64);
+    for _ in 0..300 {
+        answers = cycle(&mut dock, &hold(&robot, -1.2), 0.001);
+        most = most.max(dock.volts());
+    }
+    (answers.iter().map(|&f| feedback(&robot, f).status).collect(), most)
+}
+
+#[test]
+fn braking_on_a_bench_supply_charges_the_bus_until_the_motors_stop() {
+    // The ideal supply takes back what the motors give, braking.
+    let (statuses, most) = swing(None);
+    assert_eq!((statuses, most), (vec![status::ENABLED; 2], 24.0));
+    // A bench supply can't: braking the swing gives back about 3 J, and the
+    // two motors' capacitors take 0.2 J from 24 V to their 32 V.
+    let (statuses, most) = swing(Some(PowerSpec { volts: 24.0, ohms: 0.1 }));
+    assert_eq!(statuses, vec![status::OVERVOLTAGE; 2]);
+    assert!(most > 32.0, "{most} V");
 }
