@@ -171,6 +171,10 @@ A motor:
 
 ## What's simulated
 
+Every line below is shown by a test in [`tests/damiao.rs`](tests/damiao.rs),
+one per feature, and so is every gap: CI turns them into a table on each
+[run's summary](https://github.com/montmejat/drydock/actions/workflows/ci.yml).
+
 | | |
 |---|---|
 | MIT command, to `id` | `kp (p_des - p) + kd (v_des - v) + t_ff`, every physics step, within `peak_torque` |

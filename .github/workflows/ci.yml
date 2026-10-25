@@ -1,0 +1,85 @@
+# Every push and pull request: formatting, lints and tests, then drydock on a
+# real SocketCAN interface (vcan0) with a bus master driving it, and the table
+# of what drydock supports of Damiao's protocol, from tests/damiao.rs.
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  MUJOCO: "3.16.0"
+  MUJOCO_SHA256: "139577c541d43716a63992ab698cbc7b09788b1d547fb82b682d59b40ef49b9d"
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+
+      # MuJoCo: the one download drydock needs, as its build error says.
+      - uses: actions/cache@v4
+        id: mujoco
+        with:
+          path: ~/.cache/drydock/mujoco-${{ env.MUJOCO }}
+          key: mujoco-${{ env.MUJOCO }}
+      - if: steps.mujoco.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p ~/.cache/drydock && cd ~/.cache/drydock
+          archive=mujoco-$MUJOCO-linux-x86_64.tar.gz
+          curl -fLO https://github.com/google-deepmind/mujoco/releases/download/$MUJOCO/$archive
+          echo "$MUJOCO_SHA256  $archive" | sha256sum -c
+          tar xzf $archive && rm $archive
+
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test
+
+      - name: What drydock supports of Damiao's protocol
+        run: |
+          cargo test --test damiao -- --test-threads=1 2>/dev/null | awk '
+            /^test .* \.\.\. / {
+              name = $2; gsub("_", " ", name)
+              result = substr($0, index($0, "... ") + 4)
+              if (result == "ok") s = "yes"
+              else if (result ~ /^ignored, /) { sub(/^ignored, /, "", result); s = result }
+              else s = "**failing**"
+              print "| " name " | " s " |"
+            }' > rows.md
+          {
+            echo "## Damiao's protocol in drydock"
+            echo
+            echo "From \`tests/damiao.rs\`: supported means a test shows it."
+            echo
+            echo "| Feature | Simulated |"
+            echo "|---|---|"
+            cat rows.md
+          } | tee -a "$GITHUB_STEP_SUMMARY" > damiao-support.md
+      - uses: actions/upload-artifact@v4
+        with:
+          name: damiao-support
+          path: damiao-support.md
+
+      # The example arm on vcan0, driven by the example bus master for three
+      # seconds: every motor must answer, enabled.
+      - name: A bus master drives drydock on vcan0
+        run: |
+          sudo apt-get install -y -qq linux-modules-extra-$(uname -r)
+          sudo modprobe vcan
+          sudo ip link add dev vcan0 type vcan
+          sudo ip link set vcan0 mtu 72 up
+          cargo build --release --bins --example wave
+          ./target/release/drydock examples/arm/robot.yml > drydock.log 2>&1 &
+          sleep 1
+          ./target/release/examples/wave examples/arm/robot.yml --seconds 3 | tee wave.log
+          kill %1 || true
+          last=$(tail -n 1 wave.log)
+          echo "$last" | grep -q silent && { echo "a motor didn't answer"; cat drydock.log; exit 1; }
+          echo "$last" | grep -q '\[1\].*\[1\]' || { echo "a motor isn't enabled"; cat drydock.log; exit 1; }
