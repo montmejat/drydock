@@ -5,6 +5,7 @@ use drydock::damiao::{reg, status, Feedback, Mit, Register, RegisterReply, Speci
 use drydock::dock::Drydock;
 use drydock::robot::Robot;
 use drydock::run::steps_per_period;
+use drydock::scenario::{Change, Scenario};
 
 const SHOULDER: u16 = 0x01;
 const ELBOW: u16 = 0x02;
@@ -12,6 +13,14 @@ const ELBOW: u16 = 0x02;
 fn arm() -> (Drydock, Robot) {
     let robot = Robot::load(concat!(env!("CARGO_MANIFEST_DIR"), "/examples/arm/robot.yml")).unwrap();
     (Drydock::load(&robot).unwrap(), robot)
+}
+
+/// The arm, with what a scenario's text says happens to it.
+fn arm_with(scenario: &str) -> (Drydock, Robot) {
+    let (mut dock, robot) = arm();
+    let joints: Vec<String> = robot.motors().map(|(_, m)| m.joint.clone()).collect();
+    dock.set_scenario(Scenario::parse(scenario, &joints).unwrap());
+    (dock, robot)
 }
 
 fn feedback(robot: &Robot, frame: Frame) -> Feedback {
@@ -140,9 +149,7 @@ fn a_robot_on_can_fd_answers_in_it_and_understands_classic_frames() {
 
 #[test]
 fn a_dead_motor_lets_go_though_its_firmware_is_enabled() {
-    let mut robot = Robot::load(concat!(env!("CARGO_MANIFEST_DIR"), "/examples/arm/robot.yml")).unwrap();
-    robot.break_motor("shoulder:dead@0.5").unwrap();
-    let mut dock = Drydock::load(&robot).unwrap();
+    let (mut dock, robot) = arm_with("faults: [{ joint: shoulder, fault: dead, at: 0.5 s }]");
     cycle(&mut dock, &enable(&robot), 0.001);
     let mut answers = Vec::new();
     for _ in 0..1500 {
@@ -155,10 +162,25 @@ fn a_dead_motor_lets_go_though_its_firmware_is_enabled() {
 }
 
 #[test]
+fn a_fault_that_lasts_ends_and_says_when() {
+    let (mut dock, robot) = arm_with("faults: [{ joint: shoulder, fault: dead, at: 0.5 s, lasts: 300 ms }]");
+    cycle(&mut dock, &enable(&robot), 0.001);
+    let mut answers = Vec::new();
+    for _ in 0..1500 {
+        answers = cycle(&mut dock, &hold(&robot, -0.3), 0.001);
+    }
+    let shoulder = feedback(&robot, answers[0]);
+    assert!((shoulder.p + 0.3).abs() < 0.05, "holding again: {shoulder:?}");
+    let happened = dock.happenings();
+    assert_eq!(happened.len(), 2, "{happened:?}");
+    assert!(matches!(happened[0].what, Change::Breaks { .. }) && (happened[0].at - 0.5).abs() < 1e-3, "{happened:?}");
+    assert!(happened[1].what == Change::Recovers && (happened[1].at - 0.8).abs() < 1e-3, "{happened:?}");
+    assert_eq!(dock.joint_name(happened[0].motor), "shoulder");
+}
+
+#[test]
 fn a_frozen_encoder_reads_the_same_wherever_the_joint_goes() {
-    let mut robot = Robot::load(concat!(env!("CARGO_MANIFEST_DIR"), "/examples/arm/robot.yml")).unwrap();
-    robot.break_motor("shoulder:freeze@1").unwrap();
-    let mut dock = Drydock::load(&robot).unwrap();
+    let (mut dock, robot) = arm_with("faults: [{ joint: shoulder, fault: freeze, at: 1 s }]");
     cycle(&mut dock, &enable(&robot), 0.001);
     let mut answers = Vec::new();
     for _ in 0..1500 {

@@ -1,0 +1,8 @@
+# OpenArm's elbow drive dies six seconds in, for good: the motor answers,
+# enabled, and gives no torque. What keel's examples break.
+#
+#   drydock examples/openarm/robot.yml --scenario examples/openarm/elbow-dies.scenario.yml
+faults:
+  - joint: openarm_joint4
+    fault: dead
+    at: 6 s

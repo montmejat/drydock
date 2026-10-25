@@ -1,0 +1,18 @@
+# An arm that's seen better days: now and then an encoder freezes for half a
+# second, or reads noisily for a few; once in a long while, a drive goes
+# weak for good. At random, the same each run with the same seed.
+#
+#   drydock examples/openarm/robot.yml --scenario examples/openarm/flaky.scenario.yml
+seed: 1
+faults:
+  - joint: any
+    fault: freeze
+    every: 30 s
+    lasts: 500 ms
+  - joint: any
+    fault: noisy
+    every: 45 s
+    lasts: 3 s
+  - joint: any
+    fault: weak
+    every: 600 s

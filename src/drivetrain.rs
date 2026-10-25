@@ -6,7 +6,7 @@
 
 use serde::Deserialize;
 
-use crate::effects::{self, Encoder, Fault};
+use crate::effects::{self, Breakdown, Encoder};
 use crate::world::Joint;
 
 /// What a motor can physically give.
@@ -59,7 +59,9 @@ pub struct Drivetrain {
     pub actuator: Actuator,
     pub transmission: Transmission,
     pub encoder: Encoder,
-    pub fault: Option<Fault>,
+    /// What's broken, each until when (or for good), latest last: the
+    /// latest is what shows.
+    pub faults: Vec<(Breakdown, Option<f64>)>,
 }
 
 impl Drivetrain {
@@ -67,13 +69,27 @@ impl Drivetrain {
     /// `v`: through the transmission, then its encoder.
     pub fn sense(&mut self, now: f64, q: f64, v: f64) -> (f64, f64) {
         let (theta, omega) = self.transmission.to_motor(q, v);
-        self.encoder.sense(now, theta, omega, Fault::at(self.fault, now))
+        let fault = self.breakdown();
+        self.encoder.sense(now, theta, omega, fault)
     }
 
     /// The torque the motor gives at `now`, its firmware asking for `asked`:
     /// within its peak, unless it has broken.
-    pub fn torque(&self, now: f64, asked: f64) -> f64 {
-        effects::torque(self.actuator.torque(asked), Fault::at(self.fault, now))
+    pub fn torque(&self, asked: f64) -> f64 {
+        effects::torque(self.actuator.torque(asked), self.breakdown())
+    }
+
+    /// What shows of what's broken: the latest fault.
+    pub fn breakdown(&self) -> Option<Breakdown> {
+        self.faults.last().map(|&(fault, _)| fault)
+    }
+
+    /// The faults that are over at `now`, gone.
+    pub fn recover(&mut self, now: f64) -> Vec<Breakdown> {
+        let (over, on): (Vec<_>, Vec<_>) =
+            self.faults.drain(..).partition(|&(_, until)| until.is_some_and(|u| u <= now));
+        self.faults = on;
+        over.into_iter().map(|(fault, _)| fault).collect()
     }
 }
 

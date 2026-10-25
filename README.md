@@ -122,7 +122,7 @@ buses:
       - { joint: shoulder, model: DM4340, id: 0x01, master_id: 0x11 }
       - { joint: elbow, model: DM4310, id: 0x02, master_id: 0x12, peak_torque: 7, timeout_ms: 100 }
       - { joint: finger, model: DM4310, id: 0x08, master_id: 0x18, transmission: { ratio: 0.042, offset: 0.044 } }
-      - { joint: wrist, model: DM4310, id: 0x03, master_id: 0x13, encoder: { noise: 0.0005, quantum: 0.0004 }, fault: dead@10 }
+      - { joint: wrist, model: DM4310, id: 0x03, master_id: 0x13, encoder: { noise: 0.0005, quantum: 0.0004 } }
 seed: 0                     # optional: for the encoders' noise
 ```
 
@@ -159,15 +159,56 @@ A motor:
 - `encoder: { delay_ms, bias, drift, noise, quantum }`: what the motor's
   encoder gets wrong, in radians (perfect by default). Its firmware closes
   its loop on that reading, and answers with it. Seeded: a run repeats.
-- `fault`: how and when it breaks, in simulated seconds: `dead@10` (no
-  torque), `weak@10` (a fifth of it), `freeze@10` (the encoder repeats its
-  last reading), `noisy@10` (its noise twentyfold). Or on the command line:
-  `drydock robot.yml --break elbow:freeze@10`. A broken motor still says
-  it's enabled: finding out is the bus master's job.
 - `transmission: { ratio, offset }`: when the motor and its joint don't turn
   together. The joint is at `offset + ratio θ` when the motor is at `θ`, and
   a motor torque `τ` puts `τ / ratio` on the joint. A gripper whose rotary
   motor slides its fingers has a ratio in metres per radian.
+
+## Scenarios
+
+The robot file says what the robot is; a scenario says what happens to it.
+Motors break at set times, to check that what drives them handles it, or at
+random, as real ones do:
+
+```yaml
+seed: 7                     # optional: the same seed, the same run
+faults:
+  - joint: openarm_joint4   # exactly then
+    fault: dead
+    at: 6 s
+  - joint: any              # at random, about once a minute
+    fault: freeze
+    every: 60 s
+    lasts: 0.5 s            # then it recovers; without it, it doesn't
+```
+
+```sh
+drydock examples/openarm/robot.yml --scenario examples/openarm/elbow-dies.scenario.yml
+```
+
+- `fault`: `dead` (no torque), `weak` (a fifth of it), `freeze` (the
+  encoder repeats its last reading), `noisy` (its noise twentyfold). A broken
+  motor still says it's enabled: finding out is the bus master's job.
+- `at` or `every`: when. `every` is the mean time between two, at random
+  (any moment as likely as the next). In simulated time: `s` or `ms`.
+- `joint`: one of the robot's, or `any`, drawn each time.
+- `lasts`: how long until it recovers. Without it, it doesn't.
+- `seed`: random faults are drawn from it, each fault from its own draws, so
+  a run repeats, and adding a fault leaves the others' times as they were.
+
+What drydock broke, and when, is the answer key for whatever runs against
+it. It says so as it happens:
+
+```
+drydock: 6.000 s: openarm_joint4 breaks: dead
+```
+
+and with `--trace`, as a line of the trace, on the clock of the frames
+around it:
+
+```
+{"joint":"openarm_joint4","fault":"dead","what":"breaks","sim_s":6,"at_ns":180650934766604}
+```
 
 ## What's simulated
 
@@ -192,8 +233,8 @@ Not yet, or not at all:
 - **Registers other than the six above** get no answer, with a note. That
   includes `TIMEOUT` (9): its units aren't in the sources below, so the
   timeout is set in the robot file instead.
-- **Temperatures** are always 25 °C. Nothing overheats; faults are on a
-  flag, and only communication loss happens on its own.
+- **Temperatures** are always 25 °C. Nothing overheats; faults come from a
+  scenario, and only communication loss happens on its own.
 
 ## Time
 
@@ -239,11 +280,12 @@ the others complete.
 | `src/damiao/` | `protocol.rs`, the frames; `motor.rs`, one motor's firmware; `bus.rs`, the motors on one bus |
 | `src/drivetrain.rs` | what limits a motor's torque, how it moves its joint, what it senses |
 | `src/effects.rs` | an imperfect encoder, and how a motor breaks |
+| `src/scenario.rs` | when motors break: at set times, or at random |
 | `src/world.rs`, `shim/world.c` | MuJoCo, through a small C shim, so Rust mirrors none of its structs |
 | `src/dock.rs` | the robot: buses of motors on the world's joints |
 | `src/robot.rs` | the robot file |
 | `examples/arm` | a two-joint arm; `examples/wave.rs`, a bus master for it |
-| `examples/openarm` | OpenArm v1; `hold.cpp`, a bus master on `openarm_can` |
+| `examples/openarm` | OpenArm v1; `hold.cpp`, a bus master on `openarm_can`; scenarios (`*.scenario.yml`) |
 
 ## Sources
 

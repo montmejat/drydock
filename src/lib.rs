@@ -8,6 +8,7 @@
 //! - `damiao`: Damiao's protocol, one motor's firmware, the motors on a bus;
 //! - `drivetrain`: what limits a motor's torque, and how it moves its joint;
 //! - `effects`: an imperfect encoder, and how a motor breaks;
+//! - `scenario`: when motors break, at set times or at random;
 //! - `world`: MuJoCo;
 //! - `dock`: the robot, putting them together;
 //! - `robot`: the robot file.
@@ -19,4 +20,5 @@ pub mod drivetrain;
 pub mod effects;
 pub mod robot;
 pub mod run;
+pub mod scenario;
 pub mod world;
