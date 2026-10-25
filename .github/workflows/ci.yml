@@ -1,6 +1,7 @@
 # Every push and pull request: formatting, lints and tests, then drydock on a
 # real SocketCAN interface (vcan0) with a bus master driving it, and the table
-# of what drydock supports of Damiao's protocol, from tests/damiao.rs.
+# of what drydock supports of Damiao's protocol, from tests/damiao.rs, on the
+# run's summary page.
 name: CI
 
 on:
@@ -25,7 +26,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       # MuJoCo: the one download drydock needs, as its build error says.
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         id: mujoco
         with:
           path: ~/.cache/drydock/mujoco-${{ env.MUJOCO }}
@@ -61,11 +62,7 @@ jobs:
             echo "| Feature | Simulated |"
             echo "|---|---|"
             cat rows.md
-          } | tee -a "$GITHUB_STEP_SUMMARY" > damiao-support.md
-      - uses: actions/upload-artifact@v4
-        with:
-          name: damiao-support
-          path: damiao-support.md
+          } >> "$GITHUB_STEP_SUMMARY"
 
       # The example arm on vcan0, driven by the example bus master for three
       # seconds: every motor must answer, enabled.
