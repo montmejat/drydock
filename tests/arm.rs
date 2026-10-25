@@ -179,6 +179,21 @@ fn a_fault_that_lasts_ends_and_says_when() {
 }
 
 #[test]
+fn a_loose_connector_trips_the_elbows_timeout() {
+    // The elbow lets go after 100 ms without a frame; its link is down for
+    // 300 ms, half a second in.
+    let (mut dock, robot) = arm_with("faults: [{ joint: elbow, fault: disconnected, at: 0.5 s, lasts: 300 ms }]");
+    cycle(&mut dock, &enable(&robot), 0.001);
+    let mut answers = Vec::new();
+    for _ in 0..1000 {
+        answers = cycle(&mut dock, &hold(&robot, 0.0), 0.001);
+    }
+    assert_eq!(answers.len(), 2, "both answer again");
+    assert_eq!(feedback(&robot, answers[0]).status, status::ENABLED);
+    assert_eq!(feedback(&robot, answers[1]).status, status::COMMUNICATION_LOST);
+}
+
+#[test]
 fn a_frozen_encoder_reads_the_same_wherever_the_joint_goes() {
     let (mut dock, robot) = arm_with("faults: [{ joint: shoulder, fault: freeze, at: 1 s }]");
     cycle(&mut dock, &enable(&robot), 0.001);

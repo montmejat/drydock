@@ -56,6 +56,12 @@ pub enum Breakdown {
     /// It has lost most of its cooling (a blocked heatsink, a dead fan): it
     /// heats five times as fast, for the same torque.
     Overheat,
+    /// Its connector is loose: it neither hears frames nor answers. Its
+    /// firmware goes on with the last command it heard, until its timeout,
+    /// if it has one.
+    Disconnected,
+    /// Its link loses frames: about one in ten, each way.
+    Lossy,
 }
 
 impl Breakdown {
@@ -66,6 +72,8 @@ impl Breakdown {
             Breakdown::Freeze => "freeze",
             Breakdown::Noisy => "noisy",
             Breakdown::Overheat => "overheat",
+            Breakdown::Disconnected => "disconnected",
+            Breakdown::Lossy => "lossy",
         }
     }
 }
@@ -108,10 +116,10 @@ impl Encoder {
     }
 
     /// The reading at `now` (simulated seconds) of a motor truly at `theta`,
-    /// turning at `omega`, with `fault` (if any) having happened.
-    pub fn sense(&mut self, now: f64, theta: f64, omega: f64, fault: Option<Breakdown>) -> (f64, f64) {
+    /// turning at `omega`; `broken` says which faults it has.
+    pub fn sense(&mut self, now: f64, theta: f64, omega: f64, broken: impl Fn(Breakdown) -> bool) -> (f64, f64) {
         let s = self.settings;
-        if fault == Some(Breakdown::Freeze) && self.last_t.is_some() {
+        if broken(Breakdown::Freeze) && self.last_t.is_some() {
             return (self.last.0, 0.0);
         }
         // The newest truth at least `delay` old; the oldest there is, until then.
@@ -126,7 +134,7 @@ impl Encoder {
         if s.drift > 0.0 {
             self.offset += s.drift * dt.sqrt() * self.rng.normal();
         }
-        let noise = if fault == Some(Breakdown::Noisy) { s.noise.max(1e-3) * 20.0 } else { s.noise };
+        let noise = if broken(Breakdown::Noisy) { s.noise.max(1e-3) * 20.0 } else { s.noise };
         let mut reading = theta + self.offset;
         if noise > 0.0 {
             reading += noise * self.rng.normal();
@@ -139,13 +147,15 @@ impl Encoder {
     }
 }
 
-/// The torque a motor gives, its firmware asking for `asked`, with `fault`
-/// (if any) having happened.
-pub fn torque(asked: f64, fault: Option<Breakdown>) -> f64 {
-    match fault {
-        Some(Breakdown::Dead) => 0.0,
-        Some(Breakdown::Weak) => asked * 0.2,
-        _ => asked,
+/// The torque a motor gives, its firmware asking for `asked`; `broken` says
+/// which faults it has.
+pub fn torque(asked: f64, broken: impl Fn(Breakdown) -> bool) -> f64 {
+    if broken(Breakdown::Dead) {
+        0.0
+    } else if broken(Breakdown::Weak) {
+        asked * 0.2
+    } else {
+        asked
     }
 }
 
@@ -174,30 +184,32 @@ mod tests {
     #[test]
     fn a_perfect_encoder_reads_the_truth() {
         let mut e = Encoder::new(EncoderSettings::default(), 1);
-        assert_eq!(e.sense(0.0, 1.25, -0.5, None), (1.25, -0.5));
+        assert_eq!(e.sense(0.0, 1.25, -0.5, |_| false), (1.25, -0.5));
     }
 
     #[test]
     fn an_encoder_counts_in_steps_and_late() {
         let settings = EncoderSettings { quantum: 0.01, delay_ms: 2.0, ..Default::default() };
         let mut e = Encoder::new(settings, 1);
-        assert_eq!(e.sense(0.0, 0.123, 0.0, None).0, 0.12);
-        assert_eq!(e.sense(0.001, 0.5, 0.0, None).0, 0.12, "still the reading of t = 0");
-        assert_eq!(e.sense(0.002, 0.5, 0.0, None).0, 0.12, "the truth of t = 0, 2 ms ago");
-        assert_eq!(e.sense(0.003, 0.5, 0.0, None).0, 0.5, "the truth of t = 1 ms");
+        assert_eq!(e.sense(0.0, 0.123, 0.0, |_| false).0, 0.12);
+        assert_eq!(e.sense(0.001, 0.5, 0.0, |_| false).0, 0.12, "still the reading of t = 0");
+        assert_eq!(e.sense(0.002, 0.5, 0.0, |_| false).0, 0.12, "the truth of t = 0, 2 ms ago");
+        assert_eq!(e.sense(0.003, 0.5, 0.0, |_| false).0, 0.5, "the truth of t = 1 ms");
     }
 
     #[test]
     fn a_frozen_encoder_repeats_itself() {
         let mut e = Encoder::new(EncoderSettings::default(), 1);
-        e.sense(0.0, 0.3, 1.0, None);
-        assert_eq!(e.sense(1.0, 0.9, 1.0, Some(Breakdown::Freeze)), (0.3, 0.0));
+        e.sense(0.0, 0.3, 1.0, |_| false);
+        assert_eq!(e.sense(1.0, 0.9, 1.0, |f| f == Breakdown::Freeze), (0.3, 0.0));
     }
 
     #[test]
     fn a_dead_motor_gives_nothing_and_a_weak_one_a_fifth() {
-        assert_eq!(torque(3.0, Some(Breakdown::Dead)), 0.0);
-        assert!((torque(3.0, Some(Breakdown::Weak)) - 0.6).abs() < 1e-12);
-        assert_eq!(torque(3.0, Some(Breakdown::Freeze)), 3.0);
+        assert_eq!(torque(3.0, |f| f == Breakdown::Dead), 0.0);
+        assert!((torque(3.0, |f| f == Breakdown::Weak) - 0.6).abs() < 1e-12);
+        assert_eq!(torque(3.0, |f| f == Breakdown::Freeze), 3.0);
+        // Faults add up: dead and disconnected is still dead.
+        assert_eq!(torque(3.0, |f| matches!(f, Breakdown::Dead | Breakdown::Disconnected)), 0.0);
     }
 }

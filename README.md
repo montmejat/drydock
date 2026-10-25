@@ -190,9 +190,13 @@ drydock examples/openarm/robot.yml --scenario examples/openarm/elbow-dies.scenar
 
 - `fault`: `dead` (no torque), `weak` (a fifth of it), `freeze` (the
   encoder repeats its last reading), `noisy` (its noise twentyfold),
-  `overheat` (it has lost most of its cooling: it heats five times as fast).
-  A broken motor still says it's enabled until its firmware has something
-  to say (an overheated one does): finding out is the bus master's job.
+  `overheat` (it has lost most of its cooling: it heats five times as fast),
+  `disconnected` (a loose connector: it neither hears frames nor answers,
+  and goes on with its last command until its timeout, if it has one),
+  `lossy` (about one frame in ten lost, each way). Faults add up: a dead
+  motor that's also disconnected is still dead. A broken motor still says
+  it's enabled until its firmware has something to say (an overheated one
+  does): finding out is the bus master's job.
 - `at` or `every`: when. `every` is the mean time between two, at random
   (any moment as likely as the next). In simulated time: `s` or `ms`.
 - `joint`: one of the robot's, or `any`, drawn each time.
@@ -240,6 +244,10 @@ Not yet, or not at all:
   timeout is set in the robot file instead.
 - **No power supply.** Overvoltage, undervoltage, overcurrent and overload
   are never reported.
+- **A lost frame is just lost.** On a real bus a corrupted frame is caught
+  by its CRC, flagged with an error frame and sent again, and a node that
+  errs too often goes bus-off. drydock's link faults lose frames outright:
+  no error frames, retransmissions, error counters or bus-off.
 
 ## Heat
 

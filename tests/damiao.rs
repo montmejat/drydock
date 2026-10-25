@@ -14,6 +14,7 @@ use drydock::can::Frame;
 use drydock::damiao::{reg, status, Feedback, Limits, Mit, Register, RegisterReply, Special};
 use drydock::dock::Drydock;
 use drydock::robot::Robot;
+use drydock::scenario::Scenario;
 
 /// A DM4310 on a slide, alone on its bus, without a timeout.
 const ID: u16 = 0x08;
@@ -227,6 +228,38 @@ fn bus_can_fd_frames_cross_faster_than_classic_ones() {
     assert!(fd < classic, "FD {fd} s, classic {classic} s");
 }
 
+/// The slide, with what a scenario's text says happens to its motor.
+fn slide_with(scenario: &str) -> (Drydock, Limits) {
+    let (mut dock, limits) = slide();
+    dock.set_scenario(Scenario::parse(scenario, &["slide".to_string()]).unwrap());
+    (dock, limits)
+}
+
+#[test]
+fn bus_a_disconnected_motor_neither_hears_nor_answers_until_reconnected() {
+    let (mut dock, _) = slide_with("faults: [{ joint: slide, fault: disconnected, at: 0 s, lasts: 100 ms }]");
+    dock.step();
+    assert!(send(&mut dock, ID, Special::Enable.encode()).is_none());
+    assert!(send(&mut dock, 0x7FF, Register::Refresh { motor: ID }.encode()).is_none());
+    for _ in 0..(0.2 / dock.timestep()) as usize {
+        dock.step();
+    }
+    let f = send(&mut dock, 0x7FF, Register::Refresh { motor: ID }.encode()).expect("reconnected");
+    assert_eq!(f.id, MASTER);
+    // The enable frame it missed: it's still disabled.
+    let f = Feedback::decode(&f.eight().unwrap(), slide().1);
+    assert_eq!(f.status, status::DISABLED);
+}
+
+#[test]
+fn bus_a_lossy_link_loses_about_a_tenth_of_frames_each_way() {
+    let (mut dock, limits) = slide_with("faults: [{ joint: slide, fault: lossy, at: 0 s }]");
+    dock.step();
+    let answered = (0..2000).filter(|_| send(&mut dock, ID, command(0.0, 0.0, 0.0, limits)).is_some()).count();
+    // 0.9 × 0.9 of them, give or take: lost on the way there, or back.
+    assert!((1520..1720).contains(&answered), "{answered} of 2000");
+}
+
 /* ── Not simulated yet ── */
 
 #[test]
@@ -285,3 +318,7 @@ fn status_electrical_faults() {}
 #[test]
 #[ignore = "not simulated: the bus's bit rates are the robot file's"]
 fn bus_bit_rate_register() {}
+
+#[test]
+#[ignore = "not simulated: a lost frame is just lost; no error frames, retransmissions, error counters or bus-off"]
+fn bus_error_frames_and_bus_off() {}
