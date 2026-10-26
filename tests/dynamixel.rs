@@ -5,7 +5,7 @@
 //!
 //! Names start with what they're about: `ping_`, `read_`, `write_`, `sync_`,
 //! `bulk_`, `fast_`, `status_` (answers and errors), `servo_` (what it does
-//! with the joint), `bus_`. Features come from ROBOTIS's Protocol 2.0 and
+//! with the joint), `imu_` (the Microduck's IMU board), `bus_`. Features come from ROBOTIS's Protocol 2.0 and
 //! XL330 e-Manuals, and the servo's behaviour from BAM's model of it.
 
 use drydock::dock::Drydock;
@@ -298,6 +298,90 @@ fn servo_above_its_voltage_limit_shuts_down_unless_shutdown_says_not_to() {
     assert_eq!(one(&mut dock, 1, Instruction::Ping).error, 0, "a reboot clears it");
 }
 
+/* ── The Microduck's IMU board ── */
+
+/// A free trunk pitched 0.3 rad nose down, an IMU board on it mounted as
+/// the Microduck's (+90° about y), a servo on its hip, and one on nothing.
+fn trunk() -> Drydock {
+    let robot = Robot::load(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/xl330/trunk.yml")).unwrap();
+    let mut dock = Drydock::load(&robot).unwrap();
+    dock.step();
+    dock
+}
+
+fn half(h: u16) -> f64 {
+    let s = if h & 0x8000 != 0 { -1.0 } else { 1.0 };
+    let (e, m) = ((h >> 10) & 0x1F, (h & 0x3FF) as f64);
+    s * if e == 0 { m * 2f64.powi(-24) } else { (1.0 + m / 1024.0) * 2f64.powi(e as i32 - 15) }
+}
+
+fn multiply(a: [f64; 4], b: [f64; 4]) -> [f64; 4] {
+    [
+        a[0] * b[0] - a[1] * b[1] - a[2] * b[2] - a[3] * b[3],
+        a[0] * b[1] + a[1] * b[0] + a[2] * b[3] - a[3] * b[2],
+        a[0] * b[2] - a[1] * b[3] + a[2] * b[0] + a[3] * b[1],
+        a[0] * b[3] + a[1] * b[2] - a[2] * b[1] + a[3] * b[0],
+    ]
+}
+
+/// Gravity in the trunk's frame from the board's block, as Pollen's
+/// runtime computes it (`imu.rs`): undo the mount, then turn down into the
+/// trunk's frame.
+fn gravity(block: &[u8]) -> [f64; 3] {
+    let [x, y, z] = [6, 8, 10].map(|i| half(u16::from_le_bytes([block[i], block[i + 1]])));
+    let w = (1.0 - x * x - y * y - z * z).max(0.0).sqrt();
+    let s = std::f64::consts::FRAC_1_SQRT_2;
+    let q = multiply([w, x, y, z], [s, 0.0, -s, 0.0]);
+    let g = multiply(multiply([q[0], -q[1], -q[2], -q[3]], [0.0, 0.0, 0.0, -1.0]), q);
+    [g[1], g[2], g[3]]
+}
+
+#[test]
+fn imu_answers_with_the_servos_in_one_fast_read() {
+    let mut dock = trunk();
+    assert_eq!(send(&mut dock, 200, Instruction::Ping).len(), 1);
+    let ids = vec![200, 1, 2];
+    let replies = send(&mut dock, BROADCAST_ID, Instruction::FastSyncRead { address: 124, length: 12, ids });
+    let fast = FastReply::decode(&replies[0].bytes, &[12, 12, 12]).expect("one packet");
+    assert_eq!(fast.answers.iter().map(|a| a.id).collect::<Vec<_>>(), [200, 1, 2]);
+}
+
+#[test]
+fn imu_reads_the_trunks_gravity_through_its_mount() {
+    let mut dock = trunk();
+    let block = read(&mut dock, 200, 124, 12);
+    let g = gravity(&block);
+    // Pitched 0.3 rad nose down: down leans towards the trunk's front.
+    for (got, want) in g.iter().zip([0.3f64.sin(), 0.0, -0.3f64.cos()]) {
+        assert!((got - want).abs() < 5e-3, "{g:?}");
+    }
+}
+
+#[test]
+fn imu_refuses_writes() {
+    let mut dock = trunk();
+    assert_eq!(write(&mut dock, 200, 124, &[0]), error::ACCESS);
+}
+
+#[test]
+fn servo_on_no_joint_answers_and_holds_where_its_told() {
+    let mut dock = trunk();
+    write(&mut dock, 2, addr::TORQUE_ENABLE, &[1]);
+    write(&mut dock, 2, addr::GOAL_POSITION, &3000i32.to_le_bytes());
+    dock.step();
+    assert_eq!(i32_at(&read(&mut dock, 2, addr::PRESENT_POSITION, 4)), 3000);
+}
+
+#[test]
+fn servo_eeprom_set_up_as_the_robot_file_says() {
+    let mut dock = trunk();
+    assert_eq!(
+        (read(&mut dock, 1, addr::RETURN_DELAY_TIME, 1), read(&mut dock, 1, addr::SHUTDOWN, 1)),
+        (vec![0], vec![52])
+    );
+    assert_eq!(read(&mut dock, 2, addr::RETURN_DELAY_TIME, 1), [250], "the factory's");
+}
+
 /* ── The bus ── */
 
 #[test]
@@ -339,6 +423,10 @@ fn servo_bus_watchdog() {}
 #[test]
 #[ignore = "not simulated: indirect addresses are kept as written, but indirect data doesn't follow them"]
 fn read_indirect_addresses() {}
+
+#[test]
+#[ignore = "not simulated: the IMU board's own register map, which Pollen hasn't published; its block is as Pollen's runtime reads it, the rest as a community copy of the board documents"]
+fn imu_register_map() {}
 
 #[test]
 #[ignore = "not simulated: the secondary (shadow) id, Control Table Backup (0x20), and the XL330-M077"]

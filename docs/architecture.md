@@ -55,7 +55,8 @@ out.
 | `serial` | a serial port as a pseudo-terminal, linked where the robot file says; `serial::timing`, bytes on a half-duplex line | protocols |
 | `dynamixel::protocol` | Protocol 2.0's packets: framing, stuffing, CRC, every instruction, status and fast replies | anything but bytes ↔ values |
 | `dynamixel::xl330` | one XL330's firmware: its control table, what reads and writes do, BAM's position loop, motor and friction | joints, MuJoCo: it's handed `(t, θ, θ̇)`, the voltage and the load |
-| `dynamixel::bus` | the servos on one line: who an instruction is for, who answers, in what order, after what delay | timing, physics |
+| `dynamixel::imu` | the Microduck's IMU board: its block of gyro and orientation, from what MuJoCo says the trunk does | how the runtime uses it |
+| `dynamixel::bus` | the devices on one line (servos, the IMU board): who an instruction is for, who answers, in what order, after what delay | timing, physics |
 | `drivetrain` | what a motor can give (peak torque), how its turning moves its joint (transmission), what it senses of it | protocols |
 | `thermal` | how hot a motor's coil and drive get, from the torque it gives | when the motor trips: its firmware's |
 | `power` | the supply: what the motors draw and give back, the bus's voltage | when the motor trips: its firmware's |
@@ -95,6 +96,7 @@ carries.
 | `examples/arm` | a two-joint arm; `examples/wave.rs`, a bus master for it |
 | `examples/openarm` | OpenArm v1; `hold.cpp`, a bus master on `openarm_can`; scenarios (`*.scenario.yml`) |
 | `examples/xl330` | one XL330 on a bench; `rustypot.rs`, a bus master on Pollen's library |
+| `examples/microduck` | Pollen's Microduck; `stand.rs`, reading it as Pollen's runtime does |
 
 ## 3. A frame's way through, in real time
 

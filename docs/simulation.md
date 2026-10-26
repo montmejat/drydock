@@ -70,6 +70,8 @@ serial port, and can't tell it from the real one.
 | Present values | position (with the homing offset), velocity, current, PWM, input voltage, the realtime tick, moving |
 | Input voltage | outside the voltage limits, with the input-voltage bit in Shutdown, torque goes off and the alert bit is set until a reboot |
 | Baud rate | a servo set to another rate than the bus's neither hears nor answers |
+| A servo on no joint | answers, and holds where it's told (the Microduck's mouth, which its model leaves out) |
+| The Microduck's IMU board | id 200 on the same bus: the gyro and the fused orientation of the trunk, at the board's scales and through its mounting, as Pollen's runtime decodes them; read with the servos in one fast read |
 
 **BAM**, Rhoban's "Better Actuator Models" (Apache-2.0), is a model of the
 XL330 measured on real servos, and the one Pollen trains the Microduck's
@@ -88,6 +90,12 @@ Not yet, or not at all:
   it is; Pollen's runtime sees no alert with the input-voltage bit clear.
 - **Firmware v46**: what drydock's servos report, the oldest that answers
   Fast Sync Read. Real ones vary.
+- **The IMU board's own map.** Pollen hasn't published the board's firmware.
+  Its block at 124 is as Pollen's runtime reads it; the accelerometer, the
+  counter and the flags after it, its model number and firmware version are
+  as a community copy of the board documents them
+  ([microduck-community-kit](https://github.com/jyg9/microduck-community-kit)).
+  It refuses writes, and answers after no delay.
 - **One sender at a time**: on a real half-duplex line, two senders at once
   garble each other; drydock queues them.
 

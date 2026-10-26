@@ -14,12 +14,16 @@
 //! - The error byte carries an error number (refused writes and reads) and
 //!   the alert bit, while the servo has a hardware error.
 //!
+//! The bus may carry other devices than servos: the Microduck's IMU board
+//! (`imu`) answers on it too.
+//!
 //! A servo set to another baud rate than the bus's neither hears nor
 //! answers. So, as on a real bus, a servo whose answer would be broken
 //! (one left out of a fast read) breaks the whole answer.
 
 use std::collections::HashSet;
 
+use crate::dynamixel::imu::ImuBoard;
 use crate::dynamixel::xl330::{Refusal, Xl330};
 use crate::dynamixel::{error, Answer, FastReply, Instruction, Invalid, Packet, Status, BROADCAST_ID};
 use crate::robot::SERVO_BAUDS;
@@ -34,8 +38,86 @@ pub struct Reply {
     pub from: Option<usize>,
 }
 
+/// A device on the bus.
+#[derive(Debug, Clone)]
+pub enum Device {
+    Servo(Xl330),
+    Imu(ImuBoard),
+}
+
+impl Device {
+    pub fn id(&self) -> u8 {
+        match self {
+            Device::Servo(s) => s.id(),
+            Device::Imu(i) => i.id(),
+        }
+    }
+
+    fn baud(&self) -> u8 {
+        match self {
+            Device::Servo(s) => s.baud(),
+            Device::Imu(i) => i.baud(),
+        }
+    }
+
+    /// The IMU board's is unknown: none, as the Microduck sets its servos'.
+    fn return_delay(&self) -> f64 {
+        match self {
+            Device::Servo(s) => s.return_delay(),
+            Device::Imu(_) => 0.0,
+        }
+    }
+
+    fn status_return_level(&self) -> u8 {
+        match self {
+            Device::Servo(s) => s.status_return_level(),
+            Device::Imu(_) => 2,
+        }
+    }
+
+    fn hardware_error(&self) -> u8 {
+        match self {
+            Device::Servo(s) => s.hardware_error(),
+            Device::Imu(_) => 0,
+        }
+    }
+
+    fn read(&mut self, address: u16, length: u16) -> Result<Vec<u8>, Refusal> {
+        match self {
+            Device::Servo(s) => s.read(address, length),
+            Device::Imu(i) => i.read(address, length),
+        }
+    }
+
+    fn write(&mut self, address: u16, data: &[u8]) -> Result<(), Refusal> {
+        match self {
+            Device::Servo(s) => s.write(address, data),
+            Device::Imu(_) => Err(Refusal::Access),
+        }
+    }
+
+    fn check(&self, address: u16, data: &[u8]) -> Result<(), Refusal> {
+        match self {
+            Device::Servo(s) => s.check(address, data),
+            Device::Imu(_) => Err(Refusal::Access),
+        }
+    }
+
+    fn reboot(&mut self) {
+        if let Device::Servo(s) = self {
+            s.reboot();
+        }
+    }
+
+    fn factory_reset(&mut self, option: u8) {
+        if let Device::Servo(s) = self {
+            s.factory_reset(option);
+        }
+    }
+}
+
 pub struct Servos {
-    servos: Vec<Xl330>,
+    servos: Vec<Device>,
     /// The bus's baud rate, as the Baud Rate register codes it.
     baud: u8,
     /// A write kept by Reg Write, per servo, until Action.
@@ -45,16 +127,16 @@ pub struct Servos {
 }
 
 impl Servos {
-    pub fn new(servos: Vec<Xl330>, baud: u8) -> Self {
+    pub fn new(servos: Vec<Device>, baud: u8) -> Self {
         let registered = vec![None; servos.len()];
         Self { servos, baud, registered, said: HashSet::new() }
     }
 
-    pub fn servos(&self) -> &[Xl330] {
+    pub fn devices(&self) -> &[Device] {
         &self.servos
     }
 
-    pub fn servo_mut(&mut self, i: usize) -> &mut Xl330 {
+    pub fn device_mut(&mut self, i: usize) -> &mut Device {
         &mut self.servos[i]
     }
 
@@ -92,7 +174,7 @@ impl Servos {
                 let mut replies = Vec::new();
                 let mut after = 0.0;
                 for i in self.hearing(id).into_iter().filter(|&i| link(i)) {
-                    let mut info = self.servos[i].read(0, 7).expect("in the table");
+                    let mut info = self.servos[i].read(0, 7).unwrap_or_default();
                     info.drain(2..6);
                     let bytes = self.status(i, 0, info);
                     after += self.servos[i].return_delay();
@@ -105,7 +187,7 @@ impl Servos {
             Instruction::Write { address, data } => self.one(id, link, 2, |s| s.write(address, &data).map(|()| vec![])),
             Instruction::RegWrite { address, data } => {
                 let targets = self.hearing(id);
-                let ok = |s: &mut Xl330| s.check(address, &data).map(|()| vec![]);
+                let ok = |s: &mut Device| s.check(address, &data).map(|()| vec![]);
                 let replies = self.one(id, link, 2, ok);
                 for i in targets {
                     if self.servos[i].check(address, &data).is_ok() {
@@ -192,7 +274,7 @@ impl Servos {
         id: u8,
         link: &mut dyn FnMut(usize) -> bool,
         level: u8,
-        mut act: impl FnMut(&mut Xl330) -> Result<Vec<u8>, Refusal>,
+        mut act: impl FnMut(&mut Device) -> Result<Vec<u8>, Refusal>,
     ) -> Vec<Reply> {
         let mut replies = Vec::new();
         for i in self.hearing(id).into_iter().filter(|&i| link(i)) {

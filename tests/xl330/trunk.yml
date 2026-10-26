@@ -1,0 +1,9 @@
+scene: trunk.xml
+keyframe: pitched
+serial:
+  - port: /tmp/drydock-test-trunk
+    motors:
+      - { joint: hip, model: XL330-M288, id: 1, eeprom: { return_delay_time: 0, shutdown: 52 } }
+      - { model: XL330-M288, id: 2, eeprom: { shutdown: 52 } }
+    imu: { id: 200, site: imu, mount: [0.7071067811865476, 0, 0.7071067811865476, 0] }
+power: { volts: 7.4, battery: true }

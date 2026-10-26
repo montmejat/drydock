@@ -9,7 +9,8 @@ use crate::damiao::bus::Motors;
 use crate::damiao::motor::{Motor, Registers};
 use crate::damiao::{bit_rate, status};
 use crate::drivetrain::{Actuator, Drivetrain};
-use crate::dynamixel::bus::{Reply, Servos};
+use crate::dynamixel::bus::{Device, Reply, Servos};
+use crate::dynamixel::imu::ImuBoard;
 use crate::dynamixel::xl330::Xl330;
 use crate::dynamixel::Packet;
 use crate::effects::{Breakdown, Encoder, Rng};
@@ -17,7 +18,7 @@ use crate::power::{self, Supply};
 use crate::robot::Robot;
 use crate::scenario::{Change, Fault, Happening, Scenario};
 use crate::thermal::Thermal;
-use crate::world::World;
+use crate::world::{Site, World};
 
 pub struct Drydock {
     world: World,
@@ -44,10 +45,14 @@ struct Bus {
     heard: Vec<bool>,
 }
 
-/// One serial bus's servos, and theirs.
+/// One serial bus's devices, and the servos' ways to their joints.
 struct SerialBus {
     servos: Servos,
-    drivetrains: Vec<Drivetrain>,
+    /// For each servo on a joint: its place among the devices, and its
+    /// drivetrain. A servo on none (the Microduck's mouth) has none.
+    drivetrains: Vec<(usize, Drivetrain)>,
+    /// The IMU board, if there's one: its place, and the site it senses.
+    imu: Option<(usize, Site)>,
     /// Which servos have had a packet since the last cycle ended.
     heard: Vec<bool>,
 }
@@ -91,27 +96,43 @@ impl Drydock {
         }
         let mut serial = Vec::new();
         for (b, spec) in robot.serial.iter().enumerate() {
-            let (mut servos, mut drivetrains) = (Vec::new(), Vec::new());
+            let (mut devices, mut drivetrains) = (Vec::new(), Vec::new());
             let baud = spec.baud_code().expect("checked with the robot file");
             for (i, m) in spec.motors.iter().enumerate() {
-                let joint = world.joint(&m.joint)?;
-                if world.release_actuators(joint) > 0 {
-                    eprintln!("drydock: the scene's actuator(s) on `{}` are off: its servo drives it", m.joint);
+                let mut servo = Xl330::new(m.joint.clone().unwrap_or_else(|| format!("servo {}", m.id)), m.id, baud);
+                for (item, &value) in &m.eeprom {
+                    servo.preset(item, value)?;
                 }
-                servos.push(Xl330::new(m.joint.clone(), m.id, baud));
-                let seed = robot.seed ^ ((((robot.buses.len() + b) as u64) << 32) | (i as u64 + 1));
-                drivetrains.push(Drivetrain {
-                    joint,
-                    // What limits a servo's torque is its own firmware and motor (BAM).
-                    actuator: Actuator { peak_torque: f64::INFINITY },
-                    transmission: m.transmission,
-                    encoder: Encoder::new(m.encoder, seed),
-                    thermal: Thermal::new(f64::INFINITY),
-                    faults: Vec::new(),
-                });
+                if let Some(name) = &m.joint {
+                    let joint = world.joint(name)?;
+                    if world.release_actuators(joint) > 0 {
+                        eprintln!("drydock: the scene's actuator(s) on `{name}` are off: its servo drives it");
+                    }
+                    let seed = robot.seed ^ ((((robot.buses.len() + b) as u64) << 32) | (i as u64 + 1));
+                    let drivetrain = Drivetrain {
+                        joint,
+                        // What limits a servo's torque is its own firmware and motor (BAM).
+                        actuator: Actuator { peak_torque: f64::INFINITY },
+                        transmission: m.transmission,
+                        encoder: Encoder::new(m.encoder, seed),
+                        thermal: Thermal::new(f64::INFINITY),
+                        faults: Vec::new(),
+                    };
+                    drivetrains.push((devices.len(), drivetrain));
+                }
+                devices.push(Device::Servo(servo));
             }
-            let heard = vec![false; servos.len()];
-            serial.push(SerialBus { servos: Servos::new(servos, baud), drivetrains, heard });
+            let imu = match &spec.imu {
+                Some(imu) => {
+                    let site = world.site(&imu.site)?;
+                    let seed = robot.seed ^ 0x696d75 ^ b as u64;
+                    devices.push(Device::Imu(ImuBoard::new(imu.id, baud, imu.mount, imu.noise, seed)));
+                    Some((devices.len() - 1, site))
+                }
+                None => None,
+            };
+            let heard = vec![false; devices.len()];
+            serial.push(SerialBus { servos: Servos::new(devices, baud), drivetrains, imu, heard });
         }
         let links = Rng::new(robot.seed ^ 0x6c696e6b);
         let supply = match robot.power {
@@ -147,7 +168,10 @@ impl Drydock {
     pub fn joint_name(&self, motor: usize) -> &str {
         match self.locate(motor) {
             Place::Can(b, i) => &self.buses[b].motors.motors()[i].joint,
-            Place::Serial(b, i) => &self.serial[b].servos.servos()[i].joint,
+            Place::Serial(b, i) => match &self.serial[b].servos.devices()[self.serial[b].drivetrains[i].0] {
+                Device::Servo(s) => &s.joint,
+                Device::Imu(_) => unreachable!("an IMU drives no joint"),
+            },
         }
     }
 
@@ -169,7 +193,7 @@ impl Drydock {
 
     fn drivetrains_mut(&mut self) -> impl Iterator<Item = &mut Drivetrain> {
         let can = self.buses.iter_mut().flat_map(|b| b.drivetrains.iter_mut());
-        can.chain(self.serial.iter_mut().flat_map(|b| b.drivetrains.iter_mut()))
+        can.chain(self.serial.iter_mut().flat_map(|b| b.drivetrains.iter_mut().map(|(_, d)| d)))
     }
 
     /// The scenario's faults that start or end by `now`.
@@ -195,7 +219,7 @@ impl Drydock {
                     Fault::Motor { motor, breakdown } => {
                         let d = match self.locate(motor) {
                             Place::Can(b, i) => &mut self.buses[b].drivetrains[i],
-                            Place::Serial(b, i) => &mut self.serial[b].drivetrains[i],
+                            Place::Serial(b, i) => &mut self.serial[b].drivetrains[i].1,
                         };
                         d.faults.push((breakdown, until));
                     }
@@ -269,13 +293,16 @@ impl Drydock {
         let (b, links) = (&mut self.serial[bus], &mut self.links);
         let drivetrains = &b.drivetrains;
         let heard = &mut b.heard;
+        // A device on no joint has no link to break.
+        let drivetrain = |i: usize| drivetrains.iter().find(|(d, _)| *d == i).map(|(_, d)| d);
         let mut link = |i: usize| {
             heard[i] = true;
-            let d = &drivetrains[i];
-            !(d.has(Breakdown::Disconnected) || (d.has(Breakdown::Lossy) && links.unit() < LOSS))
+            drivetrain(i)
+                .is_none_or(|d| !(d.has(Breakdown::Disconnected) || (d.has(Breakdown::Lossy) && links.unit() < LOSS)))
         };
         let mut answers = b.servos.deliver(packet, &mut link);
-        answers.retain(|a| a.from.is_none_or(|i| !b.drivetrains[i].has(Breakdown::Lossy) || links.unit() >= LOSS));
+        answers
+            .retain(|a| a.from.and_then(drivetrain).is_none_or(|d| !d.has(Breakdown::Lossy) || links.unit() >= LOSS));
         answers
     }
 
@@ -310,13 +337,27 @@ impl Drydock {
             }
         }
         for b in &mut self.serial {
-            for (i, d) in b.drivetrains.iter_mut().enumerate() {
+            for i in 0..b.servos.devices().len() {
+                if let Device::Servo(s) = b.servos.device_mut(i) {
+                    if !b.drivetrains.iter().any(|(d, _)| *d == i) {
+                        s.idle(now, volts);
+                    }
+                }
+            }
+            if let Some((i, site)) = b.imu {
+                let trunk = self.world.inertial(site);
+                if let Device::Imu(imu) = b.servos.device_mut(i) {
+                    imu.sense(now, trunk);
+                }
+            }
+            for (i, d) in b.drivetrains.iter_mut() {
+                let Device::Servo(servo) = b.servos.device_mut(*i) else { unreachable!("a drivetrain is a servo's") };
                 let (q, v) = self.world.state(d.joint);
                 let (theta, omega) = d.sense(now, q, v);
                 let ratio = d.transmission.ratio;
                 // The load at the joint, at the horn: a joint torque τ is τ × ratio there.
                 let load = self.world.load_torque(d.joint) * ratio;
-                let out = b.servos.servo_mut(i).step(now, theta, omega, volts, load);
+                let out = servo.step(now, theta, omega, volts, load);
                 let torque = d.torque(out.torque);
                 self.world.set_force(d.joint, d.transmission.to_joint(torque));
                 self.world.set_friction(d.joint, out.frictionloss / ratio.abs(), out.damping / (ratio * ratio));
@@ -340,9 +381,10 @@ impl Drydock {
         false
     }
 
-    /// Serial bus `bus`'s servos, in the robot file's order.
-    pub fn servos(&self, bus: usize) -> &[Xl330] {
-        self.serial[bus].servos.servos()
+    /// Serial bus `bus`'s devices: its servos in the robot file's order,
+    /// then its IMU board.
+    pub fn devices(&self, bus: usize) -> &[Device] {
+        self.serial[bus].servos.devices()
     }
 }
 

@@ -110,3 +110,28 @@ void dd_set_friction(dd_world* w, int dof, double frictionloss, double damping) 
   w->m->dof_frictionloss[dof] = frictionloss;
   w->m->dof_damping[dof] = damping;
 }
+
+// A site by name: its index.
+int dd_site(const dd_world* w, const char* name, int* id, char* err, int len) {
+  int s = mj_name2id(w->m, mjOBJ_SITE, name);
+  if (s < 0) {
+    snprintf(err, len, "no site in the scene called `%s`", name);
+    return 1;
+  }
+  *id = s;
+  return 0;
+}
+
+// What an IMU on site `s` would sense, as of the last step: its orientation
+// in the world (quaternion w x y z), its angular velocity (rad/s) and the
+// specific force on it (m/s², gravity included, +9.81 up when at rest), both
+// in its own frame.
+void dd_site_imu(dd_world* w, int s, double quat[4], double gyro[3], double accel[3]) {
+  mju_mat2Quat(quat, w->d->site_xmat + 9 * s);
+  double v[6];
+  mj_objectVelocity(w->m, w->d, mjOBJ_SITE, s, v, 1);
+  gyro[0] = v[0], gyro[1] = v[1], gyro[2] = v[2];
+  mj_rnePostConstraint(w->m, w->d);
+  mj_objectAcceleration(w->m, w->d, mjOBJ_SITE, s, v, 1);
+  accel[0] = v[3], accel[1] = v[4], accel[2] = v[5];
+}

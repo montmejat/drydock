@@ -7,7 +7,7 @@ use drydock::scenario::Scenario;
 fn the_example_scenarios_read() {
     let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/examples");
     let mut read = 0;
-    for robot in ["arm", "openarm"] {
+    for robot in ["arm", "openarm", "microduck", "xl330"] {
         let path = format!("{dir}/{robot}");
         let joints: Vec<String> =
             Robot::load(format!("{path}/robot.yml")).unwrap().motors().map(|(_, m)| m.joint.clone()).collect();

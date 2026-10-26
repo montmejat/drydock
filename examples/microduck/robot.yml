@@ -1,0 +1,47 @@
+# Pollen's Microduck: fifteen Dynamixel XL330s and an IMU board on one
+# serial bus at 1 Mbit/s, on a 2S battery, as Pollen's runtime (robotd)
+# expects it (pollen-robotics/microduck: duck-control's model.rs, bus.rs
+# and imu.rs). The model is Pollen's own, fetched once on first run: the
+# scene their simulator loads (scene.xml), whose collisions reach the floor.
+# Its meshes are CC BY-NC-SA 4.0: fetched, never shipped with drydock.
+scene:
+  git: https://github.com/pollen-robotics/microduck_rl
+  commit: b02fdea4902c2b93b7d34a83a6f05da4ececb7d3
+  file: src/mjlab_microduck/robot/microduck/scene.xml
+keyframe: STAND
+serial:
+  - port: /tmp/microduck-tty
+    baud: 1000000
+    # Every servo set up as Pollen's runtime sets them (its EXPECTED_REGISTERS):
+    # no return delay, the steepest PWM slope, and Shutdown 52, which leaves
+    # out the input voltage: a charged 2S battery is above the XL330's 7.0 V.
+    # A joint's angle is its servo's position after its homing offset,
+    # centred at 2048. The knees' horns sit 512 counts (45°) round, which
+    # their homing offset of -512 takes back: the transmission says so.
+    motors:
+      - { joint: left_hip_yaw, model: XL330-M288, id: 20, eeprom: &set { return_delay_time: 0, pwm_slope: 255, shutdown: 52 } }
+      - { joint: left_hip_roll, model: XL330-M288, id: 21, eeprom: *set }
+      - { joint: left_hip_pitch, model: XL330-M288, id: 22, eeprom: *set }
+      - joint: left_knee
+        model: XL330-M288
+        id: 23
+        eeprom: &knee { return_delay_time: 0, pwm_slope: 255, shutdown: 52, homing_offset: -512 }
+        transmission: &horn { ratio: 1, offset: -0.7853981633974483 }
+      - { joint: left_ankle, model: XL330-M288, id: 24, eeprom: *set }
+      - { joint: neck_pitch, model: XL330-M288, id: 30, eeprom: *set }
+      - { joint: head_pitch, model: XL330-M288, id: 31, eeprom: *set }
+      - { joint: head_yaw, model: XL330-M288, id: 32, eeprom: *set }
+      - { joint: head_roll, model: XL330-M288, id: 33, eeprom: *set }
+      # The mouth: in no MuJoCo model of the duck. It answers, and holds where it's told.
+      - { model: XL330-M288, id: 34, eeprom: *set }
+      - { joint: right_hip_yaw, model: XL330-M288, id: 10, eeprom: *set }
+      - { joint: right_hip_roll, model: XL330-M288, id: 11, eeprom: *set }
+      - { joint: right_hip_pitch, model: XL330-M288, id: 12, eeprom: *set }
+      - { joint: right_knee, model: XL330-M288, id: 13, eeprom: *knee, transmission: *horn }
+      - { joint: right_ankle, model: XL330-M288, id: 14, eeprom: *set }
+    # The body IMU, on the trunk, mounted turned +90° about y as on the zero3
+    # board (imu.rs). Its gyro's noise is assumed: enough to change each
+    # reading, as a real one's does (robotd warns of a frozen IMU otherwise).
+    imu: { id: 200, site: imu, mount: [0.7071067811865476, 0, 0.7071067811865476, 0], noise: 0.003 }
+# A 2S Li-ion pack. Its resistance is assumed.
+power: { volts: 7.4, ohms: 0.1, battery: true }
