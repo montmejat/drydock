@@ -1,7 +1,8 @@
 //! A bus master on Pollen's `rustypot` 1.8.0, reading drydock's Microduck as
 //! Pollen's runtime does each tick (`duck-control`'s `bus.rs`): one fast
 //! read of twelve bytes at 124 from the IMU board and the fifteen servos,
-//! the IMU first. It finds every device, checks the knees count from -512,
+//! the IMU first. It finds every device, checks the knees count from -512
+//! and read their standing angle,
 //! turns torque on where the joints are, and checks the duck still stands
 //! three seconds later, by the gravity the IMU gives, decoded as Pollen's
 //! `imu.rs` decodes it. CI builds it in a project of its own, as
@@ -66,6 +67,10 @@ fn main() -> ExitCode {
         println!("FAIL reading the joints");
         return ExitCode::FAILURE;
     };
+    // A joint's angle is its servo's position, centred at 2048 (Pollen's
+    // `bus.rs`): the standing pose's knees, -0.0049 and +0.0049 rad.
+    let knees = (here[3] + 0.0049).abs() < 0.02 && (here[13] - 0.0049).abs() < 0.02;
+    check(&format!("the knees stand at {:+.3} and {:+.3} rad", here[3], here[13]), knees);
     let on = c.sync_write_goal_position(&IDS, &here).is_ok() && c.sync_write_torque_enable(&IDS, &[true; 15]).is_ok();
     check("torque on where the joints are", on);
     let ids: Vec<u8> = std::iter::once(IMU).chain(IDS).collect();
