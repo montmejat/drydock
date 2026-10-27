@@ -143,10 +143,19 @@ a second, or a frame waiting a millisecond) says so, once a second.
 
 **Lockstep** (`--lockstep <hz>`): physics advances `1/hz` seconds once every
 motor, on every bus, has had a frame since the last advance. Frames take no
-time; answers go out at once, with the state before the advance, so a
-master sending each motor one command per cycle reads, a cycle later, what
-its commands did. Runs repeat frame for frame, and go as fast as the
+time, and answers go out at once. A cycle that a read ends (every CAN frame
+reads, since Damiao's motors answer each with their state; on a serial
+line, a read instruction) advances just before the next read, so whatever
+the master sends in between acts during it: a master that reads, then
+writes, as Pollen's runtime does, reads next what its writes did, as on a
+real bus. A cycle that a write ends advances at once, so a master that only
+writes moves time on. Runs repeat frame for frame, and go as fast as the
 masters.
+
+Advancing as soon as a cycle ended, as drydock first did, delayed every
+write that follows a read by a whole cycle: the Microduck's walking policy,
+in lockstep, stepped at 1.7 Hz, with its hips swinging a quarter more than
+in real time. It now steps at 1.9 to 2.0 Hz either way.
 
 The rule ("every motor has heard from its master") needs no clock protocol
 on the bus: CANopen's SYNC would have been the alternative, but Damiao's

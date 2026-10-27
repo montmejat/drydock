@@ -164,6 +164,13 @@ impl Packet {
         out.extend(crc(&out).to_le_bytes());
         out
     }
+
+    /// Whether it asks the servos for their control table: the reads, one
+    /// servo's or several's.
+    pub fn reads(&self) -> bool {
+        use instruction::*;
+        matches!(self.instruction, READ | SYNC_READ | FAST_SYNC_READ | BULK_READ | FAST_BULK_READ)
+    }
 }
 
 /// Why the [`Decoder`] dropped what began as a packet. It then looks for the

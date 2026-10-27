@@ -13,6 +13,7 @@ use drydock::dynamixel::bus::Reply;
 use drydock::dynamixel::xl330::addr;
 use drydock::dynamixel::{error, Chunk, Decoder, FastReply, Instruction, Packet, Region, Status, BROADCAST_ID};
 use drydock::robot::Robot;
+use drydock::run::Lockstep;
 use drydock::scenario::Scenario;
 
 /// Two XL330s, ids 1 and 2, arms hanging down, on 5 V.
@@ -400,6 +401,43 @@ fn bus_a_disconnected_servo_neither_hears_nor_answers() {
     dock.step();
     assert!(send(&mut dock, 1, Instruction::Ping).is_empty());
     assert_eq!(send(&mut dock, 2, Instruction::Ping).len(), 1);
+}
+
+#[test]
+fn bus_in_lockstep_a_read_sees_what_the_writes_since_the_last_did() {
+    // Pollen's runtime each tick: read everything, then write. Its writes
+    // act from when they arrive, so the next read sees them at work.
+    let mut dock = pair();
+    let mut clock = Lockstep::new(dock.timestep(), 10.0 * dock.timestep()).unwrap();
+    let mut deliver = |dock: &mut Drydock, id: u8, instruction: Instruction| {
+        let p = packet(id, &instruction);
+        clock.deliver(dock, p.reads(), |dock| dock.deliver_packet(0, &p)).0
+    };
+    let position = |replies: Vec<Reply>| i32_at(&status(&replies[0]).params);
+    let at_rest = position(deliver(&mut dock, 1, Instruction::Read { address: addr::PRESENT_POSITION, length: 4 }));
+    // Servo 2 completes the cycle, a read: its physics waits for the next read.
+    deliver(&mut dock, 2, Instruction::Read { address: addr::PRESENT_POSITION, length: 4 });
+    deliver(&mut dock, 1, Instruction::Write { address: addr::TORQUE_ENABLE, data: vec![1] });
+    deliver(&mut dock, 1, Instruction::Write { address: addr::GOAL_POSITION, data: 2048i32.to_le_bytes().to_vec() });
+    let after = position(deliver(&mut dock, 1, Instruction::Read { address: addr::PRESENT_POSITION, length: 4 }));
+    assert!(at_rest - after > 10, "the arm started up within the cycle: {at_rest} then {after}");
+}
+
+#[test]
+fn bus_in_lockstep_a_master_that_only_writes_moves_time_on() {
+    let mut dock = pair();
+    let period = 10.0 * dock.timestep();
+    let mut clock = Lockstep::new(dock.timestep(), period).unwrap();
+    let tick = |dock: &mut Drydock| u16::from_le_bytes(read(dock, 1, addr::REALTIME_TICK, 2).try_into().unwrap());
+    let before = tick(&mut dock);
+    for _ in 0..5 {
+        for id in [1, 2] {
+            let p =
+                packet(id, &Instruction::Write { address: addr::GOAL_POSITION, data: 2048i32.to_le_bytes().to_vec() });
+            clock.deliver(&mut dock, false, |dock| dock.deliver_packet(0, &p));
+        }
+    }
+    assert_eq!(tick(&mut dock) - before, (5.0 * period * 1e3).round() as u16, "five cycles, in ms");
 }
 
 /* ── Not simulated yet ── */
