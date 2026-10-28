@@ -5,7 +5,7 @@ use drydock::damiao::{reg, status, Feedback, Mit, Register, RegisterReply, Speci
 use drydock::dock::Drydock;
 use drydock::power::PowerSpec;
 use drydock::robot::Robot;
-use drydock::run::steps_per_period;
+use drydock::run::{steps_per_period, Lockstep};
 use drydock::scenario::{Change, Fault, Scenario};
 
 const SHOULDER: u16 = 0x01;
@@ -124,6 +124,28 @@ fn lockstep_runs_are_the_same() {
         all
     };
     assert_eq!(run(), run());
+}
+
+#[test]
+fn lockstep_answers_each_frame_with_every_cycle_before_it() {
+    // Damiao's motors answer every frame with their state, so a cycle's
+    // physics runs just before the next frame: the answers are those of a
+    // cycle run as soon as it ends.
+    let frames = |robot: &Robot, i: usize| match i {
+        0 => enable(robot),
+        _ => hold(robot, 0.4 * (i as f32 * 0.01).sin()),
+    };
+    let (mut dock, robot) = arm();
+    let at_once: Vec<Frame> = (0..300).flat_map(|i| cycle(&mut dock, &frames(&robot, i), 0.001)).collect();
+    let (mut dock, _) = arm();
+    let mut clock = Lockstep::new(dock.timestep(), 0.001).unwrap();
+    let mut by_clock = Vec::new();
+    for i in 0..300 {
+        for (id, data) in frames(&robot, i) {
+            by_clock.extend(clock.deliver(&mut dock, true, |dock| dock.deliver(0, &Frame::new(id, data))).0);
+        }
+    }
+    assert_eq!(at_once, by_clock);
 }
 
 #[test]

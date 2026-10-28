@@ -198,10 +198,11 @@ it answers is across (500 µs as it leaves the factory: the Microduck sets
 
 **In lockstep** (`--lockstep <hz>`), time follows the bus master. Each frame
 or packet is answered at once, and once every motor has had one, `1/hz`
-seconds of physics run. A master that sends each motor a command per cycle reads, in
-the answers, what its previous commands did, a cycle later, as on a real bus.
-Unlike a real bus, every run is the same, frame for frame, and runs as fast
-as the master goes; frames take no time. Time stands still while the master is silent, so
+seconds of physics run: just before the next read, so a master's commands
+act from when they're sent, as on a real bus, and its next read sees what
+they did. Unlike a real bus, every run is the same, frame for frame, and runs as fast
+as the master goes; frames take no time, and a cycle's commands all land at
+the same instant. Time stands still while the master is silent, so
 timeouts never fire in lockstep unless a motor is left out of cycles that
 the others complete.
 

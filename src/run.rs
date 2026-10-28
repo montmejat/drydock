@@ -344,48 +344,95 @@ pub fn realtime(
     }
 }
 
-/// In lockstep with the bus masters: each frame or packet reaches the
-/// motors at once and is answered at once, with the state as it is, and
-/// `period` seconds of physics run once every motor has had a frame or a
-/// packet. Time stands still while the masters don't send, and frames and
-/// bytes take no time.
+/// When physics runs in lockstep: `period` seconds once every motor has had
+/// a frame or a packet, a cycle of the bus masters.
 ///
-/// A master that sends a command to each motor per cycle therefore reads,
-/// in the answers, the state its previous commands brought, a cycle later:
-/// as on a real bus, but the same each run.
+/// A cycle a read ends runs just before the next read, so whatever the
+/// master sends in between acts during it: a master that reads, then
+/// writes, as Pollen's runtime does, reads next what its writes did, as on
+/// a real bus, where commands act as soon as they arrive. A cycle a write
+/// ends runs at once, so a master that only writes moves time on. Every
+/// CAN frame reads: Damiao's motors answer each one with their state.
+pub struct Lockstep {
+    steps: u32,
+    /// A cycle ended by a read, whose physics hasn't run yet.
+    owed: bool,
+}
+
+impl Lockstep {
+    pub fn new(timestep: f64, period: f64) -> Result<Self, String> {
+        Ok(Self { steps: steps_per_period(timestep, period)?, owed: false })
+    }
+
+    /// Delivers a frame or a packet with `deliver`, which `reads` or not,
+    /// running physics before or after it as the cycle says. Its answer,
+    /// and whether physics ran.
+    pub fn deliver<T>(
+        &mut self,
+        dock: &mut Drydock,
+        reads: bool,
+        deliver: impl FnOnce(&mut Drydock) -> T,
+    ) -> (T, bool) {
+        let mut ran = false;
+        if reads && self.owed {
+            self.run(dock);
+            ran = true;
+        }
+        let answer = deliver(dock);
+        if dock.cycle_done() {
+            if reads {
+                self.owed = true;
+            } else {
+                self.run(dock);
+                ran = true;
+            }
+        }
+        (answer, ran)
+    }
+
+    fn run(&mut self, dock: &mut Drydock) {
+        self.owed = false;
+        for _ in 0..self.steps {
+            dock.step();
+        }
+    }
+}
+
+/// In lockstep with the bus masters, as [`Lockstep`] says: each frame or
+/// packet reaches the motors at once and is answered at once, with the
+/// state as it is. Time stands still while the masters don't send, and
+/// frames and bytes take no time. Runs are the same each time.
 pub fn lockstep(mut dock: Drydock, lines: &[Line], serial: &mut [SerialLine], period: f64) -> io::Result<()> {
-    let steps = steps_per_period(dock.timestep(), period).map_err(io::Error::other)?;
+    let mut clock = Lockstep::new(dock.timestep(), period).map_err(io::Error::other)?;
     let fds: Vec<RawFd> = lines.iter().map(|l| l.socket.as_raw_fd()).chain(serial.iter().map(|s| s.pty.fd())).collect();
     let mut said = Said::default();
     let mut buf = [0u8; 4096];
-    let cycle = |dock: &mut Drydock| -> io::Result<()> {
-        if dock.cycle_done() {
-            for _ in 0..steps {
-                dock.step();
-            }
-            report(dock, None, 0.0)?;
-        }
-        Ok(())
-    };
     loop {
         let ready = wait_any(&fds, None)?;
         for (i, _) in ready.iter().enumerate().filter(|(_, &r)| r) {
             if i < lines.len() {
                 while let Some(frame) = lines[i].socket.try_recv()? {
-                    if let Some(answer) = dock.deliver(i, &frame) {
+                    let (answer, ran) = clock.deliver(&mut dock, true, |dock| dock.deliver(i, &frame));
+                    if ran {
+                        report(&mut dock, None, 0.0)?;
+                    }
+                    if let Some(answer) = answer {
                         lines[i].socket.send(&answer)?;
                     }
-                    cycle(&mut dock)?;
                 }
             } else {
                 let b = i - lines.len();
                 let n = serial[b].pty.read(&mut buf)?;
                 // No time passes in lockstep: no gap ever drops a packet.
                 for packet in serial[b].packets(&buf[..n], 0.0, 0.0, &mut said) {
-                    for reply in dock.deliver_packet(b, &packet) {
+                    let (replies, ran) =
+                        clock.deliver(&mut dock, packet.reads(), |dock| dock.deliver_packet(b, &packet));
+                    if ran {
+                        report(&mut dock, None, 0.0)?;
+                    }
+                    for reply in replies {
                         serial[b].pty.write(&reply.bytes)?;
                     }
-                    cycle(&mut dock)?;
                 }
             }
         }
