@@ -1,17 +1,21 @@
 # drydock
 
-A robot's motors on virtual buses, CAN or serial, their physics simulated
-in MuJoCo.
+A robot's motors on virtual buses, CAN, serial or EtherCAT, their physics
+simulated in MuJoCo.
 
 ## What it supports
 
-drydock speaks two protocols, and tries to speak each completely:
+drydock speaks three protocols, and tries to speak each completely:
 
 - **Damiao's motors** on CAN (DM-J4310, DM-J4340, DM-J8009 and the rest), in
   MIT mode and their three other modes, as on OpenArm and many other arms
   and legs.
 - **Dynamixel servos** on a serial line: Protocol 2.0 and the XL330, as on
   Pollen's Microduck, after BAM's measured model of it.
+- **CiA 402 servo drives on EtherCAT**, each on an ET1100 chip, for any
+  EtherCAT master (SOEM, ethercrab) on a veth pair: the AL states, CoE,
+  PDO mapping, and CSP, CSV and CST. New, and not yet complete: see
+  [docs/ethercat.md](docs/ethercat.md).
 
 Every feature is shown by a test in [`tests/damiao.rs`](tests/damiao.rs) and
 [`tests/dynamixel.rs`](tests/dynamixel.rs), and so is every gap: CI turns
@@ -106,6 +110,8 @@ MuJoCo frame by frame without a bus.
   heat, power and time; the sources.
 - [OpenArm](docs/openarm.md): OpenArm v1, driven by keel or by OpenArm's own
   library.
+- [EtherCAT](docs/ethercat.md): the chain from master to drive, end to
+  end; running a three-joint arm under SOEM or ethercrab; what's missing.
 - [Microduck](docs/microduck.md): Pollen's Microduck, its servos and IMU on
   one serial bus, read by Pollen's own servo library.
 - [Design](docs/architecture.md): the pieces, how a frame and a step go

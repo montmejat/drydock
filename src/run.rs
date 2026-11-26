@@ -16,6 +16,15 @@ use crate::poll::wait_any;
 use crate::scenario::{Change, Fault, Happening};
 use crate::serial::{timing as serial_timing, Pty};
 
+/// An EtherCAT line as the clock sees it: its raw socket. A frame passes
+/// through the drives as soon as it arrives and goes straight back: a chip
+/// forwards a frame within a microsecond, while a veth pair's own latency
+/// is tens, so there's no wire time to add.
+pub struct EthercatLine {
+    pub name: String,
+    pub socket: crate::ethercat::Socket,
+}
+
 /// Behind the wall clock by more than this, the simulation stops trying to
 /// catch up, and says so.
 const MAX_LAG: Duration = Duration::from_millis(100);
@@ -228,6 +237,7 @@ pub fn realtime(
     mut dock: Drydock,
     lines: &[Line],
     serial: &mut [SerialLine],
+    ethercat: &[EthercatLine],
     mut trace: Option<BusTrace>,
 ) -> io::Result<()> {
     // SAFETY: a prctl with no pointers. Waits end within a microsecond of
@@ -238,7 +248,12 @@ pub fn realtime(
         t.base_ns = monotonic_ns();
     }
     let seconds = || clock.elapsed().as_secs_f64();
-    let fds: Vec<RawFd> = lines.iter().map(|l| l.socket.as_raw_fd()).chain(serial.iter().map(|s| s.pty.fd())).collect();
+    let fds: Vec<RawFd> = lines
+        .iter()
+        .map(|l| l.socket.as_raw_fd())
+        .chain(serial.iter().map(|s| s.pty.fd()))
+        .chain(ethercat.iter().map(|e| e.socket.as_raw_fd()))
+        .collect();
     let mut buses: Vec<Timeline> = lines.iter().map(|l| Timeline::new(l.rates)).collect();
     let mut wires: Vec<serial_timing::Line> = serial.iter().map(|s| serial_timing::Line::new(s.baud)).collect();
     let mut said = Said::default();
@@ -308,10 +323,17 @@ pub fn realtime(
                     while let Some(frame) = lines[i].socket.try_recv()? {
                         buses[i].push(frame, From::Master, seconds());
                     }
-                } else {
+                } else if i < lines.len() + serial.len() {
                     let b = i - lines.len();
                     let n = serial[b].pty.read(&mut buf)?;
                     wires[b].push(buf[..n].to_vec(), serial_timing::From::Master, seconds());
+                } else {
+                    let l = i - lines.len() - serial.len();
+                    while let Some(mut frame) = ethercat[l].socket.try_recv()? {
+                        if dock.deliver_frame(l, &mut frame) {
+                            ethercat[l].socket.send(&frame)?;
+                        }
+                    }
                 }
             }
         }
@@ -402,9 +424,20 @@ impl Lockstep {
 /// packet reaches the motors at once and is answered at once, with the
 /// state as it is. Time stands still while the masters don't send, and
 /// frames and bytes take no time. Runs are the same each time.
-pub fn lockstep(mut dock: Drydock, lines: &[Line], serial: &mut [SerialLine], period: f64) -> io::Result<()> {
+pub fn lockstep(
+    mut dock: Drydock,
+    lines: &[Line],
+    serial: &mut [SerialLine],
+    ethercat: &[EthercatLine],
+    period: f64,
+) -> io::Result<()> {
     let mut clock = Lockstep::new(dock.timestep(), period).map_err(io::Error::other)?;
-    let fds: Vec<RawFd> = lines.iter().map(|l| l.socket.as_raw_fd()).chain(serial.iter().map(|s| s.pty.fd())).collect();
+    let fds: Vec<RawFd> = lines
+        .iter()
+        .map(|l| l.socket.as_raw_fd())
+        .chain(serial.iter().map(|s| s.pty.fd()))
+        .chain(ethercat.iter().map(|e| e.socket.as_raw_fd()))
+        .collect();
     let mut said = Said::default();
     let mut buf = [0u8; 4096];
     loop {
@@ -418,6 +451,19 @@ pub fn lockstep(mut dock: Drydock, lines: &[Line], serial: &mut [SerialLine], pe
                     }
                     if let Some(answer) = answer {
                         lines[i].socket.send(&answer)?;
+                    }
+                }
+            } else if i >= lines.len() + serial.len() {
+                let l = i - lines.len() - serial.len();
+                while let Some(mut frame) = ethercat[l].socket.try_recv()? {
+                    // A frame reads the drives' inputs as it writes their
+                    // outputs: a cycle it ends runs before the next frame.
+                    let (back, ran) = clock.deliver(&mut dock, true, |dock| dock.deliver_frame(l, &mut frame));
+                    if ran {
+                        report(&mut dock, None, 0.0)?;
+                    }
+                    if back {
+                        ethercat[l].socket.send(&frame)?;
                     }
                 }
             } else {

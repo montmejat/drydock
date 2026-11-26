@@ -14,6 +14,8 @@ use crate::dynamixel::imu::ImuBoard;
 use crate::dynamixel::xl330::Xl330;
 use crate::dynamixel::Packet;
 use crate::effects::{Breakdown, Encoder, Rng};
+use crate::ethercat::drive::{self, Drive, Settings};
+use crate::ethercat::frame;
 use crate::power::{self, Supply};
 use crate::robot::Robot;
 use crate::scenario::{Change, Fault, Happening, Scenario};
@@ -24,6 +26,7 @@ pub struct Drydock {
     world: World,
     buses: Vec<Bus>,
     serial: Vec<SerialBus>,
+    ethercat: Vec<EthercatLine>,
     scenario: Option<Scenario>,
     /// What the scenario did, not yet asked for.
     happened: Vec<Happening>,
@@ -54,6 +57,15 @@ struct SerialBus {
     /// The IMU board, if there's one: its place, and the site it senses.
     imu: Option<(usize, Site)>,
     /// Which servos have had a packet since the last cycle ended.
+    heard: Vec<bool>,
+}
+
+/// One EtherCAT line's drives, in the cable's order, and their ways to
+/// their joints.
+struct EthercatLine {
+    drives: Vec<Drive>,
+    drivetrains: Vec<Drivetrain>,
+    /// Which drives have had their outputs written since the last cycle ended.
     heard: Vec<bool>,
 }
 
@@ -134,6 +146,43 @@ impl Drydock {
             let heard = vec![false; devices.len()];
             serial.push(SerialBus { servos: Servos::new(devices, baud), drivetrains, imu, heard });
         }
+        let mut ethercat = Vec::new();
+        for (l, spec) in robot.ethercat.iter().enumerate() {
+            let (mut drives, mut drivetrains) = (Vec::new(), Vec::new());
+            for (i, d) in spec.drives.iter().enumerate() {
+                let joint = world.joint(&d.joint)?;
+                if world.release_actuators(joint) > 0 {
+                    eprintln!("drydock: the scene's actuator(s) on `{}` are off: its drive drives it", d.joint);
+                }
+                let settings = Settings {
+                    vendor: d.vendor,
+                    product: d.product,
+                    revision: d.revision,
+                    // Each drive its own serial number, as on a real line.
+                    serial: i as u32 + 1,
+                    name: d.name.clone(),
+                    counts_per_turn: d.counts_per_turn,
+                    rated_torque: d.rated_torque,
+                    peak_torque: d.peak_torque,
+                    kp: d.gains.kp,
+                    kd: d.gains.kd,
+                    kv: d.gains.kv,
+                };
+                drives.push(Drive::new(d.joint.clone(), settings));
+                let lines_before = robot.buses.len() + robot.serial.len();
+                let seed = robot.seed ^ ((((lines_before + l) as u64) << 32) | (i as u64 + 1));
+                drivetrains.push(Drivetrain {
+                    joint,
+                    actuator: Actuator { peak_torque: d.peak_torque },
+                    transmission: d.transmission,
+                    encoder: Encoder::new(d.encoder, seed),
+                    thermal: Thermal::new(d.rated_torque),
+                    faults: Vec::new(),
+                });
+            }
+            let heard = vec![false; drives.len()];
+            ethercat.push(EthercatLine { drives, drivetrains, heard });
+        }
         let links = Rng::new(robot.seed ^ 0x6c696e6b);
         let supply = match robot.power {
             Some(spec) => Supply::new(spec, robot.joints().len()),
@@ -144,6 +193,7 @@ impl Drydock {
             world,
             buses,
             serial,
+            ethercat,
             scenario: None,
             happened: Vec::new(),
             links,
@@ -172,6 +222,7 @@ impl Drydock {
                 Device::Servo(s) => &s.joint,
                 Device::Imu(_) => unreachable!("an IMU drives no joint"),
             },
+            Place::Ethercat(l, i) => &self.ethercat[l].drives[i].joint,
         }
     }
 
@@ -188,12 +239,19 @@ impl Drydock {
             }
             motor -= bus.drivetrains.len();
         }
+        for (l, line) in self.ethercat.iter().enumerate() {
+            if motor < line.drivetrains.len() {
+                return Place::Ethercat(l, motor);
+            }
+            motor -= line.drivetrains.len();
+        }
         panic!("no motor {motor}")
     }
 
     fn drivetrains_mut(&mut self) -> impl Iterator<Item = &mut Drivetrain> {
         let can = self.buses.iter_mut().flat_map(|b| b.drivetrains.iter_mut());
-        can.chain(self.serial.iter_mut().flat_map(|b| b.drivetrains.iter_mut().map(|(_, d)| d)))
+        let serial = self.serial.iter_mut().flat_map(|b| b.drivetrains.iter_mut().map(|(_, d)| d));
+        can.chain(serial).chain(self.ethercat.iter_mut().flat_map(|l| l.drivetrains.iter_mut()))
     }
 
     /// The scenario's faults that start or end by `now`.
@@ -220,6 +278,7 @@ impl Drydock {
                         let d = match self.locate(motor) {
                             Place::Can(b, i) => &mut self.buses[b].drivetrains[i],
                             Place::Serial(b, i) => &mut self.serial[b].drivetrains[i].1,
+                            Place::Ethercat(l, i) => &mut self.ethercat[l].drivetrains[i],
                         };
                         d.faults.push((breakdown, until));
                     }
@@ -306,6 +365,38 @@ impl Drydock {
         answers
     }
 
+    /// An EtherCAT frame reached EtherCAT line `line`: it passes through the
+    /// drives, which change it as their chips do. Whether it comes back:
+    /// a malformed frame goes no further, and on a lossy link one in ten is
+    /// lost. A drive whose link is down cuts the line: the frame turns at
+    /// the drive before it, and none after it sees it.
+    pub fn deliver_frame(&mut self, line: usize, frame: &mut [u8]) -> bool {
+        let (l, links) = (&mut self.ethercat[line], &mut self.links);
+        let reachable = l.drivetrains.iter().position(|d| d.has(Breakdown::Disconnected)).unwrap_or(l.drives.len());
+        if l.drivetrains[..reachable].iter().any(|d| d.has(Breakdown::Lossy)) && links.unit() < LOSS {
+            return false;
+        }
+        for (i, d) in l.drives.iter_mut().enumerate() {
+            d.esc.set_line(i + 1 < reachable);
+        }
+        let mut devices: Vec<&mut dyn frame::Device> =
+            l.drives[..reachable].iter_mut().map(|d| d as &mut dyn frame::Device).collect();
+        if frame::pass(frame, &mut devices).is_err() {
+            return false;
+        }
+        for (i, d) in l.drives.iter_mut().enumerate() {
+            if d.take_cycle() {
+                l.heard[i] = true;
+            }
+        }
+        true
+    }
+
+    /// EtherCAT line `line`'s drives, in the cable's order.
+    pub fn drives(&self, line: usize) -> &[Drive] {
+        &self.ethercat[line].drives
+    }
+
     /// One step of physics, under the torques the motors give now, and
     /// what they draw from the supply for it.
     pub fn step(&mut self) {
@@ -365,6 +456,24 @@ impl Drydock {
                 watts += volts * out.duty * out.current;
             }
         }
+        for l in &mut self.ethercat {
+            for (drive, d) in l.drives.iter_mut().zip(&mut l.drivetrains) {
+                let (q, v) = self.world.state(d.joint);
+                let (theta, omega) = d.sense(now, q, v);
+                drive.power(volts);
+                drive.sense(now, theta, omega);
+                let asked = drive.law();
+                if asked != 0.0 && d.has(Breakdown::Shorted) {
+                    drive.trip(drive::error_code::SHORT_CIRCUIT);
+                }
+                let torque = if d.has(Breakdown::Shorted) { 0.0 } else { d.torque(asked) };
+                drive.applied(torque);
+                d.heat(dt, torque);
+                let (_, speed) = d.transmission.to_motor(q, v);
+                watts += power::draw(torque, speed, d.thermal.rated_torque);
+                self.world.set_force(d.joint, d.transmission.to_joint(torque));
+            }
+        }
         self.supply.step(dt, watts);
         self.world.step();
     }
@@ -373,9 +482,13 @@ impl Drydock {
     /// said yes: a cycle of the bus masters, in lockstep.
     pub fn cycle_done(&mut self) -> bool {
         let all = |heard: &[bool]| heard.iter().all(|&h| h);
-        if self.buses.iter().all(|b| all(&b.heard)) && self.serial.iter().all(|b| all(&b.heard)) {
+        if self.buses.iter().all(|b| all(&b.heard))
+            && self.serial.iter().all(|b| all(&b.heard))
+            && self.ethercat.iter().all(|l| all(&l.heard))
+        {
             self.buses.iter_mut().for_each(|b| b.heard.fill(false));
             self.serial.iter_mut().for_each(|b| b.heard.fill(false));
+            self.ethercat.iter_mut().for_each(|l| l.heard.fill(false));
             return true;
         }
         false
@@ -392,4 +505,5 @@ impl Drydock {
 enum Place {
     Can(usize, usize),
     Serial(usize, usize),
+    Ethercat(usize, usize),
 }
