@@ -1,0 +1,32 @@
+{
+  "question": "How does a motor's command become a force on a joint?",
+  "tldr": "Firmware asks torque; drivetrain limits it; supply and MuJoCo respond.",
+  "answer": "Each step, every motor senses its joint through its drivetrain, its firmware's law asks for a torque from its latest command, the actuator gives what it can, and that torque goes onto the joint as an applied force. All motors' power adds into one supply total, whose voltage they read next step.",
+  "why": "The step mixes firmware, drivetrain, heat, power and faults in one method; the picture separates who decides the torque, who limits it, and what feeds back.",
+  "kind": "dataflow",
+  "nodes": [
+    {"id": "faults", "label": "Drydock::faults", "tldr": "Apply and lift scenario faults now due", "explain": "Breakdowns from the scenario (dead, weak, shorted, frozen encoder, lost link, supply drop) start or end at this simulated time.", "anchors": ["drydock/dock::Drydock::step", "drydock/scenario::Scenario::due"]},
+    {"id": "world_in", "label": "World::state", "tldr": "Joint position and velocity from MuJoCo", "explain": "Read through the C shim; Rust never sees MuJoCo's structs.", "anchors": ["drydock/world::World::state"]},
+    {"id": "sense", "label": "Drivetrain::sense", "tldr": "What the motor's encoder reads", "explain": "Through the transmission to the motor's shaft, then the encoder's delay, bias, drift, noise and counts.", "anchors": ["drydock/drivetrain::Drivetrain::sense", "drydock/effects::Encoder::sense"]},
+    {"id": "law", "label": "firmware law", "tldr": "Torque the firmware asks from its command", "explain": "Damiao: kp(p_des − θ) + kd(v_des − θ̇) + t_ff when enabled, error D past its timeout. XL330: BAM's position loop and motor model. CiA 402 drive: CSP/CSV/CST loops.", "anchors": ["drydock/damiao/motor::Motor::law", "drydock/dynamixel/xl330::Xl330::step", "drydock/ethercat/drive::Drive::law"], "focus": true},
+    {"id": "limit", "label": "Drivetrain::torque", "tldr": "Actuator gives what it can", "explain": "Clamped to peak torque; none if the motor is dead or shorted, a fifth if weak. The motor records what it got, to report back as a real drive reports measured current.", "anchors": ["drydock/drivetrain::Drivetrain::torque", "drydock/drivetrain::Actuator::torque", "drydock/damiao/motor::Motor::applied"]},
+    {"id": "heat", "label": "Thermal::step", "tldr": "Coil and drive warm with torque²", "explain": "Each heads for a temperature that grows with the square of torque over rated torque; the firmware trips at its OT value.", "anchors": ["drydock/drivetrain::Drivetrain::heat", "drydock/thermal::Thermal::step"]},
+    {"id": "watts", "label": "power draw", "tldr": "All motors' draw summed", "explain": "Each enabled motor's electrical power, positive when driving, negative when braking.", "anchors": ["drydock/power::draw"], "total": true},
+    {"id": "supply", "label": "Supply", "tldr": "Bus voltage sags or rises", "explain": "Ideal unless the robot file describes one; then it sags through its wires and can't absorb braking, charging the bus capacitors. Motors trip on UV/OV.", "anchors": ["drydock/power::Supply::step", "drydock/power::Supply::volts"], "carries": true},
+    {"id": "force", "label": "World::set_force", "tldr": "Joint torque as qfrc_applied", "explain": "Through the transmission back to the joint. Servos also set the joint's friction each step from BAM's model.", "anchors": ["drydock/world::World::set_force", "drydock/world::World::set_friction", "drydock/drivetrain::Transmission::to_joint"]},
+    {"id": "mj", "label": "World::step", "tldr": "MuJoCo advances one timestep", "explain": "mj_step on the robot's own MJCF, via shim/world.c.", "anchors": ["drydock/world::World::step"]}
+  ],
+  "edges": [
+    {"from": "faults", "to": "limit", "label": "breakdowns"},
+    {"from": "faults", "to": "sense", "label": "encoder faults"},
+    {"from": "world_in", "to": "sense", "label": "(q, q̇)"},
+    {"from": "sense", "to": "law", "label": "(θ, θ̇)"},
+    {"from": "supply", "to": "law", "label": "volts"},
+    {"from": "law", "to": "limit", "label": "asked torque"},
+    {"from": "limit", "to": "heat", "label": "torque"},
+    {"from": "limit", "to": "watts", "label": "torque × speed"},
+    {"from": "limit", "to": "force", "label": "motor torque"},
+    {"from": "watts", "to": "supply", "label": "total watts", "next": true},
+    {"from": "force", "to": "mj", "label": "qfrc_applied"}
+  ]
+}

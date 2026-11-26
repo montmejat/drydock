@@ -1,0 +1,33 @@
+{
+  "question": "Where is the line between the robot's software and the simulation?",
+  "tldr": "At the bus: masters are real, everything past the port is modelled.",
+  "answer": "Bus masters run unchanged and talk to real Linux interfaces (vcan, pty, veth). Behind each interface, drydock models one protocol's devices; all of them share the drivetrain, the supply and one MuJoCo world, reached only through the C shim.",
+  "why": "Shows which pieces belong to which protocol and which are shared, and the one boundary to MuJoCo, which the module list alone doesn't.",
+  "kind": "zones",
+  "nodes": [
+    {"id": "masters", "label": "bus masters", "tldr": "Robot software, unchanged", "explain": "openarm_can, keel, Pollen's rustypot, an EtherCAT master like SOEM or ethercrab, the examples.", "anchors": [], "outside": true},
+    {"id": "ifaces", "label": "vcan0 / pty / veth", "tldr": "Real Linux interfaces", "explain": "SocketCAN virtual CAN, a pseudo-terminal linked at the robot file's path, or one end of a veth pair.", "anchors": [], "outside": true},
+    {"id": "drydock", "label": "drydock", "tldr": "The simulated robot", "explain": "One process: the clock, the protocols, the shared physics.", "anchors": ["drydock"], "zone": true},
+    {"id": "clock", "label": "run", "tldr": "Clock: real time or lockstep", "explain": "Waits on all interfaces, times frames on each bus, and steps physics.", "anchors": ["drydock/run", "drydock/poll"], "in": "drydock"},
+    {"id": "can", "label": "CAN + Damiao", "tldr": "Frames, bus timing, motor firmware", "explain": "SocketCAN frames, bit-accurate timing and arbitration, and each Damiao motor's firmware.", "anchors": ["drydock/can", "drydock/damiao"], "in": "drydock"},
+    {"id": "dxl", "label": "serial + Dynamixel", "tldr": "Packets, byte timing, XL330 and IMU", "explain": "Protocol 2.0 packets over a pty, half-duplex byte timing, XL330 firmware and the Microduck IMU board.", "anchors": ["drydock/serial", "drydock/dynamixel"], "in": "drydock"},
+    {"id": "ecat", "label": "EtherCAT", "tldr": "ET1100 chips and CiA 402 drives", "explain": "Frames passing through a line of simulated ESCs, CoE mailboxes, and drive firmware. Work in progress.", "anchors": ["drydock/ethercat"], "in": "drydock"},
+    {"id": "dock", "label": "Drydock", "tldr": "Buses of motors on joints", "explain": "Built from the robot file: each bus's motors, each motor's drivetrain and joint, the supply, the scenario.", "anchors": ["drydock/dock::Drydock", "drydock/robot::Robot"], "in": "drydock", "focus": true},
+    {"id": "shared", "label": "drivetrain, heat, power, faults", "tldr": "Shared physical models", "explain": "Torque limits and transmissions, thermal, supply, encoder errors and scenario faults, the same for every protocol.", "anchors": ["drydock/drivetrain", "drydock/thermal", "drydock/power", "drydock/effects", "drydock/scenario"], "in": "drydock"},
+    {"id": "world", "label": "World", "tldr": "Safe wrapper over the C shim", "explain": "Joints by name, their state, forces and friction, stepping. The only Rust that calls MuJoCo.", "anchors": ["drydock/world"], "in": "drydock"},
+    {"id": "mujoco", "label": "MuJoCo via shim/world.c", "tldr": "Physics of the robot's own MJCF", "explain": "MuJoCo 3.16's C library, downloaded once; the shim is the only code touching its structs.", "anchors": [], "outside": true}
+  ],
+  "edges": [
+    {"from": "masters", "to": "ifaces", "label": "frames / bytes"},
+    {"from": "ifaces", "to": "clock", "label": "frames / bytes"},
+    {"from": "clock", "to": "dock", "label": "deliver, step"},
+    {"from": "dock", "to": "can", "label": "CAN frames"},
+    {"from": "dock", "to": "dxl", "label": "packets"},
+    {"from": "dock", "to": "ecat", "label": "EtherCAT frames"},
+    {"from": "can", "to": "shared", "label": "asked torque"},
+    {"from": "dxl", "to": "shared", "label": "asked torque, friction"},
+    {"from": "ecat", "to": "shared", "label": "asked torque"},
+    {"from": "shared", "to": "world", "label": "joint force"},
+    {"from": "world", "to": "mujoco", "label": "dd_* C calls"}
+  ]
+}

@@ -1,0 +1,28 @@
+{
+  "question": "How does an EtherCAT frame pass through the simulated drives?",
+  "tldr": "Down the line through each chip in turn, then straight back.",
+  "answer": "A frame read from the veth passes through each drive's ET1100 chip in cable order; each chip reads and writes its part of every datagram, and the drive's firmware reacts to what was written. The frame turns at the last reachable drive and goes back to the master unchanged on the way.",
+  "why": "Datagrams, chips, sync managers and the drive's firmware are four layers in four files; the picture shows which one acts on what.",
+  "kind": "pipeline",
+  "nodes": [
+    {"id": "master", "label": "EtherCAT master", "tldr": "SOEM, ethercrab… on the veth's other end", "explain": "Sends frames of datagrams addressed by position, station address or logical (FMMU) address.", "anchors": [], "outside": true},
+    {"id": "recv", "label": "ethercat::Socket", "tldr": "Raw socket, EtherType 0x88A4 only", "explain": "A raw packet socket on ecs0. In real time the frame is handled as it arrives: a chip forwards within a microsecond, less than the veth's own latency.", "anchors": ["drydock/ethercat::Socket::try_recv"]},
+    {"id": "links", "label": "Drydock::deliver_frame", "tldr": "Cut the line at a broken link", "explain": "A disconnected drive cuts the cable there; a lossy one drops about one frame in ten.", "anchors": ["drydock/dock::Drydock::deliver_frame"]},
+    {"id": "pass", "label": "frame::pass", "tldr": "Each device processes the whole frame in turn", "explain": "Checks every datagram's length first, then hands the frame to each device in order; what the first changes, the second sees, as on a cable.", "anchors": ["drydock/ethercat/frame::pass", "drydock/ethercat/frame::access"], "focus": true},
+    {"id": "esc", "label": "Esc::datagram", "tldr": "Chip reads/writes its registers and RAM", "explain": "The ET1100: physical and logical addressing through FMMUs, sync managers for mailboxes and process data, the SII EEPROM interface, AL control and status, the working counter.", "anchors": ["drydock/ethercat/esc::Esc::datagram", "drydock/ethercat/esc::Esc::physical", "drydock/ethercat/esc::Esc::logical"]},
+    {"id": "drive", "label": "Drive firmware", "tldr": "AL states, mailbox, PDOs, CiA 402", "explain": "Reacts to the chip's writes: AL state requests (Init→PreOp→SafeOp→Op), CoE SDO requests in the mailbox, the controlword and targets in the output PDO; fills the input PDO with statusword and position.", "anchors": ["drydock/ethercat/drive::Drive::datagram", "drydock/ethercat/drive::Drive::al_control", "drydock/ethercat/drive::Drive::controlword"]},
+    {"id": "coe", "label": "coe::handle", "tldr": "SDO uploads and downloads", "explain": "Reads and writes the object dictionary through the mailbox, answering with aborts for missing or read-only objects.", "anchors": ["drydock/ethercat/coe::handle", "drydock/ethercat/coe::Dictionary"]},
+    {"id": "sii", "label": "SII image", "tldr": "Identity and PDO layout in EEPROM", "explain": "What the master reads first: vendor, product, mailbox and PDO areas.", "anchors": ["drydock/ethercat/sii::image"]},
+    {"id": "send", "label": "Socket::send", "tldr": "Frame returns to the master", "explain": "The changed frame, with working counters, goes back out the same interface.", "anchors": ["drydock/ethercat::Socket::send"]}
+  ],
+  "edges": [
+    {"from": "master", "to": "recv", "label": "Ethernet frame"},
+    {"from": "links", "to": "pass", "label": "reachable drives"},
+    {"from": "pass", "to": "esc", "label": "datagram"},
+    {"from": "esc", "to": "drive", "label": "register / RAM writes"},
+    {"from": "sii", "to": "esc", "label": "EEPROM words"},
+    {"from": "drive", "to": "coe", "label": "mailbox request"},
+    {"from": "coe", "to": "esc", "label": "mailbox reply"},
+    {"from": "pass", "to": "send", "label": "frame, changed in place"}
+  ]
+}
