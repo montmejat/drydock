@@ -1,0 +1,31 @@
+{
+  "question": "What does drydock do each physics timestep in real time?",
+  "tldr": "Move frames across buses until the step is due, then step physics.",
+  "answer": "Between two physics steps, drydock waits on every bus at once, moves frames across each bus as long as their bits take, and hands arrived frames to the motors, whose answers queue on the same bus. When the timestep is due, every motor runs its law and MuJoCo steps once.",
+  "why": "The loop interleaves two clocks (bus time and physics time) inside one function; the picture shows which happens inside the inner loop and which once per step.",
+  "kind": "loop",
+  "rate": "every physics timestep of the wall clock, usually 1 ms",
+  "nodes": [
+    {"id": "start", "label": "main", "tldr": "Load robot file, open buses, pick clock", "explain": "Reads the robot file and scenario, builds the simulated robot (Drydock), opens each SocketCAN socket, serial pty and EtherCAT socket, then runs the real-time or lockstep loop.", "anchors": ["drydock::main_", "drydock/dock::Drydock::load"], "start": true},
+    {"id": "wait", "label": "wait_any", "tldr": "Sleep until a socket is readable or an event", "explain": "One poll over all buses' file descriptors, woken by the earliest of: the next step being due, or the next frame finishing on a bus timeline.", "anchors": ["drydock/poll::wait_any"]},
+    {"id": "recv", "label": "read the masters' frames", "tldr": "Queue received frames on their bus timeline", "explain": "CAN frames and serial bytes are pushed onto their bus's timeline, ready now. EtherCAT frames skip the timeline: they pass through the drives at once and go straight back.", "anchors": ["drydock/can::Socket::try_recv", "drydock/serial::Pty::read", "drydock/run::realtime"]},
+    {"id": "cross", "label": "Timeline::advance", "tldr": "Frames whose bits have crossed by now", "explain": "Each bus lets one frame across at a time, lowest CAN id first (arbitration), for as long as its bits take, stuffing included. Serial lines do the same with bytes at the baud rate.", "anchors": ["drydock/can/timing::Timeline::advance", "drydock/serial/timing::Line::advance"], "detail": "can-frame-path"},
+    {"id": "deliver", "label": "deliver to motors", "tldr": "Firmware handles frame, answer queued after reply delay", "explain": "An arrived master frame goes to the motor it's addressed to; its answer is queued on the same bus, ready reply_us later. An arrived motor answer is written to the master's socket.", "anchors": ["drydock/dock::Drydock::deliver", "drydock/dock::Drydock::deliver_packet"], "detail": "can-frame-path"},
+    {"id": "step", "label": "Drydock::step", "tldr": "Motor laws, drivetrains, supply, then MuJoCo steps", "explain": "Once the timestep is due: faults are applied, each motor's law turns its latest command into a torque, the drivetrain limits it and puts it on the joint, and MuJoCo steps once.", "anchors": ["drydock/dock::Drydock::step"], "detail": "physics-step", "focus": true},
+    {"id": "report", "label": "report", "tldr": "Log faults and busy buses, write trace", "explain": "Prints what the scenario broke or restored, writes it to the trace, and once a second says if a bus is close to full. Falling over 100 ms behind is said and forgiven.", "anchors": ["drydock/run::report", "drydock/can/timing::Timeline::report"]},
+    {"id": "state", "label": "world + bus queues", "tldr": "Robot state and frames still crossing", "explain": "Carried from step to step: MuJoCo's joint state, each motor's latest command and registers, and each bus's queue of frames waiting or on the wire.", "anchors": ["drydock/world::World", "drydock/can/timing::Timeline", "drydock/damiao/motor::Motor"], "carries": true},
+    {"id": "end", "label": "killed", "tldr": "Runs until stopped or an I/O error", "explain": "The loop never returns on its own; it ends on Ctrl-C or when a socket fails.", "anchors": ["drydock::main"], "end": true}
+  ],
+  "edges": [
+    {"from": "start", "to": "wait", "label": "sockets, Drydock"},
+    {"from": "wait", "to": "recv", "label": "ready fds"},
+    {"from": "recv", "to": "cross", "label": "frames, ready now"},
+    {"from": "state", "to": "cross", "label": "queued frames"},
+    {"from": "cross", "to": "deliver", "label": "crossed frames"},
+    {"from": "deliver", "to": "state", "label": "answers queued, commands kept"},
+    {"from": "state", "to": "step", "label": "joint state, commands"},
+    {"from": "step", "to": "report", "label": "happenings"},
+    {"from": "step", "to": "state", "label": "new joint state", "next": true},
+    {"from": "report", "to": "end", "label": "error"}
+  ]
+}

@@ -4,7 +4,7 @@ use drydock::can::Socket;
 use drydock::dock::Drydock;
 use drydock::dynamixel::bus::Device;
 use drydock::robot::Robot;
-use drydock::run::{self, BusTrace, Line, SerialLine};
+use drydock::run::{self, BusTrace, EthercatLine, Line, SerialLine};
 use drydock::scenario::Scenario;
 use drydock::serial::Pty;
 
@@ -93,6 +93,21 @@ fn main_() -> Result<(), String> {
         serial.push(SerialLine::new(pty, bus.baud));
     }
 
+    let mut ethercat = Vec::new();
+    for line in &robot.ethercat {
+        let name = &line.interface;
+        let socket = drydock::ethercat::Socket::open(name).map_err(|e| {
+            format!(
+                "can't open the Ethernet interface `{name}` raw: {e}. A virtual cable, once per boot, the \
+                 master's end `ecm0`:\n\n  \
+                 sudo ip link add ecm0 type veth peer name {name} && sudo ip link set ecm0 up && sudo ip link set {name} up\n\n\
+                 and raw sockets for drydock (and the master):\n\n  \
+                 sudo setcap cap_net_raw+ep target/release/drydock\n"
+            )
+        })?;
+        ethercat.push(EthercatLine { name: name.clone(), socket });
+    }
+
     let pace = match lockstep {
         Some(hz) => format!("in lockstep at {hz} Hz"),
         None => "in real time".into(),
@@ -123,12 +138,18 @@ fn main_() -> Result<(), String> {
             }
         }
     }
+    for (l, line) in robot.ethercat.iter().enumerate() {
+        eprintln!("  {} (EtherCAT: the master opens the veth pair's other end)", line.interface);
+        for (i, d) in dock.drives(l).iter().enumerate() {
+            eprintln!("    {:<22} position {i}, ET1100, CiA 402", d.joint);
+        }
+    }
     if let Some(file) = &scenario {
         eprintln!("drydock: what happens to it: {file}");
     }
     let result = match lockstep {
-        Some(hz) => run::lockstep(dock, &lines, &mut serial, 1.0 / hz),
-        None => run::realtime(dock, &lines, &mut serial, trace),
+        Some(hz) => run::lockstep(dock, &lines, &mut serial, &ethercat, 1.0 / hz),
+        None => run::realtime(dock, &lines, &mut serial, &ethercat, trace),
     };
     result.map_err(|e| format!("a bus: {e}"))
 }

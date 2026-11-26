@@ -1,0 +1,85 @@
+{
+  "summary": "drydock puts a simulated robot behind real bus interfaces: a bus master opens vcan0 (or a serial pty, or an EtherCAT veth) instead of the real port, sends the frames it would send to the motors, and gets the answers the real motors would give, when they would give them, while MuJoCo moves the robot. What matters most is being the hardware frame for frame: same bytes, same answers, same bus timing, every claim backed by a source.",
+  "features": [
+    {
+      "id": "damiao-can",
+      "name": "Damiao motors on CAN",
+      "status": "working",
+      "description": "Damiao's motors (DM-J4310, DM-J4340, DM-J8009…) on SocketCAN, classic or CAN FD: MIT mode and the three other modes, special frames, registers, timeout and error states, answering as the firmware does.",
+      "modules": ["drydock/damiao", "drydock/can"],
+      "note": ""
+    },
+    {
+      "id": "dynamixel-serial",
+      "name": "Dynamixel XL330 on serial",
+      "status": "working",
+      "description": "Dynamixel Protocol 2.0 on a pseudo-terminal linked where the robot file says: every instruction, sync/bulk/fast reads, the XL330's control table and BAM's measured motor and friction model.",
+      "modules": ["drydock/dynamixel/protocol", "drydock/dynamixel/bus", "drydock/dynamixel/xl330", "drydock/dynamixel", "drydock/serial"],
+      "note": ""
+    },
+    {
+      "id": "microduck-imu",
+      "name": "Microduck IMU board",
+      "status": "working",
+      "description": "The Microduck's IMU board answers on the servos' line with gyro and orientation, computed from what MuJoCo says the trunk does.",
+      "modules": ["drydock/dynamixel/imu"],
+      "note": ""
+    },
+    {
+      "id": "ethercat",
+      "name": "EtherCAT CiA 402 drives",
+      "status": "partial",
+      "description": "CiA 402 servo drives, each behind a simulated ET1100 chip, in a line on a veth interface: AL states, SII EEPROM, CoE SDOs, PDOs, and CSP/CSV/CST modes driving joints.",
+      "modules": ["drydock/ethercat"],
+      "note": "In draft PR #15. 17 tests, scenario faults included, and 7 ignored gaps (distributed clocks, wire time, bit mappings, segmented SDOs, SDO info, emergencies, a real drive's objects). CI runs ethercrab (the tests) and SOEM's slaveinfo and simple_ng."
+    },
+    {
+      "id": "physics",
+      "name": "MuJoCo physics and drivetrains",
+      "status": "working",
+      "description": "Each motor's torque goes through its actuator limit and transmission onto a joint as an applied force; MuJoCo steps the robot's own MJCF scene through a small C shim.",
+      "modules": ["drydock/world", "drydock/drivetrain", "drydock/dock"],
+      "note": ""
+    },
+    {
+      "id": "motor-realism",
+      "name": "Heat, power and encoder errors",
+      "status": "working",
+      "description": "Coil and drive temperatures that trip the firmware, a supply that sags and over-volts when motors brake, and encoders that read late, biased, noisy or frozen.",
+      "modules": ["drydock/thermal", "drydock/power", "drydock/effects"],
+      "note": ""
+    },
+    {
+      "id": "scenarios",
+      "name": "Fault scenarios",
+      "status": "working",
+      "description": "A scenario file breaks motors or the supply at set times or at random from a seed, in simulated time, so runs repeat; what broke goes in the log and the trace.",
+      "modules": ["drydock/scenario"],
+      "note": ""
+    },
+    {
+      "id": "clock",
+      "name": "Real time and lockstep",
+      "status": "working",
+      "description": "Real time: physics each timestep of the wall clock, frames crossing each bus as long as their bits take, in arbitration order. Lockstep: physics advances once every motor has heard from its master.",
+      "modules": ["drydock/run", "drydock/poll", "drydock/can/timing", "drydock/serial/timing"],
+      "note": ""
+    },
+    {
+      "id": "bus-trace",
+      "name": "Bus trace",
+      "status": "working",
+      "description": "--trace writes every frame or packet that crosses a bus with when it was ready, started and arrived, and every fault as it starts and ends (real time only).",
+      "modules": ["drydock/run"],
+      "note": ""
+    },
+    {
+      "id": "robot-file",
+      "name": "Robot file and command line",
+      "status": "working",
+      "description": "A YAML robot file names the MJCF scene (fetched by repository and commit if needed) and its buses, motors, ids and joints; the command line loads it and says how to fix what's missing.",
+      "modules": ["drydock", "drydock/robot", "drydock/dock"],
+      "note": ""
+    }
+  ]
+}

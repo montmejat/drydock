@@ -7,6 +7,7 @@
 //! - `run`: the clock, real time or lockstep, over every bus;
 //! - `damiao`: Damiao's protocol, one motor's firmware, the motors on a bus;
 //! - `dynamixel`: Dynamixel's Protocol 2.0, the XL330's firmware, the servos on a serial bus;
+//! - `ethercat`: EtherCAT, an ET1100 chip and a CiA 402 drive's firmware, the drives on a line;
 //! - `serial`: serial ports as pseudo-terminals, and how long bytes take on a line;
 //! - `drivetrain`: what limits a motor's torque, and how it moves its joint;
 //! - `thermal`: how hot a motor's coil and drive get;
@@ -22,6 +23,7 @@ pub mod dock;
 pub mod drivetrain;
 pub mod dynamixel;
 pub mod effects;
+pub mod ethercat;
 pub mod poll;
 pub mod power;
 pub mod robot;

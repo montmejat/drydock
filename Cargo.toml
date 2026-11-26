@@ -9,3 +9,7 @@ description = "A robot's motors on a virtual CAN bus, their physics simulated in
 libc = "0.2"
 serde = { version = "1", features = ["derive"] }
 serde_yaml = "0.9"
+
+[dev-dependencies]
+ethercrab = "0.7.1"
+smol = "2.0.2"

@@ -1,0 +1,34 @@
+{
+  "question": "How does a master enable a CiA 402 drive, and what stops it?",
+  "tldr": "Controlword 0x06, 0x07, 0x0F enables; faults and quick stop disable.",
+  "answer": "The master steps the drive through CiA 402's power states with the controlword (0x6040), and reads where it is from the statusword (0x6041). Only Operation Enabled gives torque; a fault, a quick stop or leaving EtherCAT's Operational state takes it away.",
+  "why": "The transitions live in one match in Drive::controlword, but faults, quick stop and leaving Op reach the state from three other functions; the picture puts every way in and out of Operation Enabled in one place.",
+  "kind": "dataflow",
+  "nodes": [
+    {"id": "power", "label": "power on", "tldr": "drive starts in Switch On Disabled", "explain": "CiA 402 starts in Not Ready To Switch On while the drive tests itself; drydock's drives have nothing to test and start one state later.", "anchors": ["drydock/ethercat/drive::Drive::new"], "start": true},
+    {"id": "sod", "label": "Switch On Disabled", "tldr": "statusword 0x0040: no power to the motor", "explain": "Where every way out of operation ends. The motor gives no torque.", "anchors": ["drydock/ethercat/drive::Cia402::bits"]},
+    {"id": "rtso", "label": "Ready To Switch On", "tldr": "statusword 0x0021, after Shutdown (0x06)", "explain": "Transition 2. Still no torque.", "anchors": ["drydock/ethercat/drive::Drive::controlword"]},
+    {"id": "so", "label": "Switched On", "tldr": "statusword 0x0023, after Switch On (0x07)", "explain": "Transition 3. On a real drive the power stage is on, but the motor isn't driven yet.", "anchors": ["drydock/ethercat/drive::Drive::controlword"]},
+    {"id": "oe", "label": "Operation Enabled", "tldr": "statusword 0x0027: the mode's loop drives the joint", "explain": "Transition 4, after Enable Operation (0x0F). The only state that gives torque: CSP, CSV or CST, whichever 0x6061 says. 0x0F from Ready To Switch On does transitions 3 and 4 at once.", "anchors": ["drydock/ethercat/drive::Drive::controlword", "drydock/ethercat/drive::Drive::law"], "focus": true},
+    {"id": "qs", "label": "Quick Stop Active", "tldr": "statusword 0x0007: brakes, then lets go", "explain": "Controlword bit 2 cleared in Operation Enabled. The drive brakes on its velocity loop, then goes to Switch On Disabled once still (quick stop option code 2).", "anchors": ["drydock/ethercat/drive::Drive::law"]},
+    {"id": "fra", "label": "Fault Reaction Active", "tldr": "statusword 0x000F: torque off", "explain": "Any fault lands here first. drydock's reaction is the torque off, which is over at once.", "anchors": ["drydock/ethercat/drive::Drive::fault"]},
+    {"id": "fault", "label": "Fault", "tldr": "statusword 0x0008, the reason in 0x603F", "explain": "Stays here until the master resets it with a rising edge on controlword bit 7 (0x80); the error code (0x603F) clears then.", "anchors": ["drydock/ethercat/drive::Drive::fault", "drydock/ethercat/drive::Drive::controlword"]},
+    {"id": "causes", "label": "following error, short circuit", "tldr": "0x8611 in CSP, or a shorted motor", "explain": "A following error outside its window (0x6065) longer than its timeout (0x6066), or a scenario's shorted motor as soon as it drives.", "anchors": ["drydock/ethercat/drive::Drive::following", "drydock/ethercat/drive::Drive::trip"]},
+    {"id": "leftop", "label": "left Operational", "tldr": "AL state drops: outputs no longer arrive", "explain": "The master leaves EtherCAT's Op state, or the SM watchdog sees no outputs for 100 ms: an enabled or switched-on drive goes to Switch On Disabled.", "anchors": ["drydock/ethercat/drive::Drive::left_op", "drydock/ethercat/drive::Drive::watchdog"]}
+  ],
+  "edges": [
+    {"from": "power", "to": "sod", "label": "starts"},
+    {"from": "sod", "to": "rtso", "label": "0x06 Shutdown"},
+    {"from": "rtso", "to": "so", "label": "0x07 Switch On"},
+    {"from": "so", "to": "oe", "label": "0x0F Enable Operation"},
+    {"from": "oe", "to": "so", "label": "0x07 Disable Operation"},
+    {"from": "oe", "to": "rtso", "label": "0x06 Shutdown"},
+    {"from": "oe", "to": "qs", "label": "bit 2 cleared: Quick Stop"},
+    {"from": "qs", "to": "sod", "label": "still, or bit 1 cleared"},
+    {"from": "oe", "to": "sod", "label": "bit 1 cleared: Disable Voltage"},
+    {"from": "causes", "to": "fra", "label": "error code"},
+    {"from": "fra", "to": "fault", "label": "torque off"},
+    {"from": "fault", "to": "sod", "label": "0x80 Fault Reset"},
+    {"from": "leftop", "to": "sod", "label": "torque off"}
+  ]
+}

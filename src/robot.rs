@@ -26,6 +26,12 @@
 //!     baud: 1000000           # optional: 1 Mbit/s by default
 //!     motors:
 //!       - { joint: right_knee, model: XL330-M288, id: 13 }
+//! # EtherCAT lines of CiA 402 drives, each on an interface drydock opens
+//! # raw: one end of a veth pair, whose other end the master opens.
+//! ethercat:
+//!   - interface: ecs0
+//!     drives:                 # in the order the cable runs through them
+//!       - { joint: base, rated_torque: 10, peak_torque: 30, gains: { kp: 300, kd: 6, kv: 8 } }
 //! power: { volts: 24, ohms: 0.1 }  # optional: a bench supply, through its wires (`power.rs`)
 //! seed: 0                     # optional: for the encoders' noise
 //! ```
@@ -54,6 +60,9 @@ pub struct Robot {
     /// Serial buses of Dynamixel servos.
     #[serde(default)]
     pub serial: Vec<SerialSpec>,
+    /// EtherCAT lines of CiA 402 drives.
+    #[serde(default)]
+    pub ethercat: Vec<EthercatSpec>,
     /// A bench supply; an ideal one without.
     #[serde(default)]
     pub power: Option<PowerSpec>,
@@ -270,6 +279,60 @@ impl SerialSpec {
     }
 }
 
+/// An EtherCAT line: its interface, and its drives in the cable's order.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EthercatSpec {
+    /// The interface drydock opens raw (`ecs0`): one end of a veth pair.
+    pub interface: String,
+    pub drives: Vec<DriveSpec>,
+}
+
+/// A CiA 402 servo drive on an ET1100 (`ethercat::drive`).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DriveSpec {
+    pub joint: String,
+    /// Its identity (0x1018 and the EEPROM): the drive it plays, if any.
+    #[serde(default)]
+    pub vendor: u32,
+    #[serde(default)]
+    pub product: u32,
+    #[serde(default)]
+    pub revision: u32,
+    #[serde(default = "default_drive_name")]
+    pub name: String,
+    /// Encoder counts per turn of the motor: 2^17 by default.
+    #[serde(default = "default_counts")]
+    pub counts_per_turn: u32,
+    /// N m: what the drive's torques are thousandths of (0x6076).
+    pub rated_torque: f64,
+    /// N m: what it can give at most.
+    pub peak_torque: f64,
+    /// Its loops' tuning: CSP's (kp, kd), CSV's (kv).
+    pub gains: Gains,
+    #[serde(default)]
+    pub transmission: Transmission,
+    #[serde(default)]
+    pub encoder: EncoderSettings,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Gains {
+    pub kp: f64,
+    pub kd: f64,
+    pub kv: f64,
+}
+
+fn default_drive_name() -> String {
+    "drydock CiA 402 drive".into()
+}
+
+fn default_counts() -> u32 {
+    1 << 17
+}
+
 #[derive(Debug, Clone, Copy, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LimitsSpec {
@@ -322,16 +385,17 @@ impl Robot {
         self.buses.iter().flat_map(|b| b.motors.iter().map(move |m| (b, m)))
     }
 
-    /// Every joint a motor or a servo drives, CAN buses first then serial,
-    /// each in the file's order: how a scenario counts them.
+    /// Every joint a motor, a servo or a drive drives: CAN buses first, then
+    /// serial, then EtherCAT, each in the file's order: how a scenario counts them.
     pub fn joints(&self) -> Vec<String> {
         let servos = self.serial.iter().flat_map(|b| b.motors.iter().filter_map(|m| m.joint.clone()));
-        self.motors().map(|(_, m)| m.joint.clone()).chain(servos).collect()
+        let drives = self.ethercat.iter().flat_map(|l| l.drives.iter().map(|d| d.joint.clone()));
+        self.motors().map(|(_, m)| m.joint.clone()).chain(servos).chain(drives).collect()
     }
 
     fn check(&self) -> Result<(), String> {
-        if self.buses.is_empty() && self.serial.is_empty() {
-            return Err("no buses: a robot has CAN `buses`, `serial` buses, or both".into());
+        if self.buses.is_empty() && self.serial.is_empty() && self.ethercat.is_empty() {
+            return Err("no buses: a robot has CAN `buses`, `serial` buses, `ethercat` lines, or some of each".into());
         }
         let mut interfaces = Vec::new();
         for bus in &self.buses {
@@ -348,6 +412,14 @@ impl Robot {
             }
             ports.push(&bus.port);
             check_serial(bus).map_err(|e| format!("{}: {e}", bus.port.display()))?;
+        }
+        let mut lines = Vec::new();
+        for line in &self.ethercat {
+            if lines.contains(&&line.interface) || interfaces.contains(&&line.interface) {
+                return Err(format!("{} is listed twice", line.interface));
+            }
+            lines.push(&line.interface);
+            check_ethercat(line).map_err(|e| format!("{}: {e}", line.interface))?;
         }
         if !self.serial.is_empty() && self.power.is_none() {
             return Err("Dynamixel servos run at 3.7 to 6 V, or from a 2S battery: say what powers them, \
@@ -366,6 +438,26 @@ impl Robot {
         }
         Ok(())
     }
+}
+
+/// A line has drives, each with torques and gains above zero.
+fn check_ethercat(line: &EthercatSpec) -> Result<(), String> {
+    if line.drives.is_empty() {
+        return Err("no drives".into());
+    }
+    for d in &line.drives {
+        let g = d.gains;
+        if [d.rated_torque, d.peak_torque, g.kp, g.kd, g.kv].iter().any(|x| !(x.is_finite() && *x > 0.0)) {
+            return Err(format!("{}: rated_torque, peak_torque and the gains are above zero", d.joint));
+        }
+        if d.counts_per_turn == 0 {
+            return Err(format!("{}: counts_per_turn is above zero", d.joint));
+        }
+        if !d.transmission.ratio.is_finite() || d.transmission.ratio == 0.0 || !d.transmission.offset.is_finite() {
+            return Err(format!("{}: a transmission's ratio isn't zero", d.joint));
+        }
+    }
+    Ok(())
 }
 
 /// Servo ids are 0 to 252 and apart from each other; the bus runs at a

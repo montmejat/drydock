@@ -1,0 +1,28 @@
+{
+  "question": "What happens to a CAN frame from the master to its answer?",
+  "tldr": "Queued, arbitrated, timed bit by bit, answered by the firmware.",
+  "answer": "A master's frame waits on its bus's timeline, crosses when it wins arbitration, and is handed to the motor it addresses; the firmware reads its angle through the drivetrain and answers, and the answer crosses the same bus before reaching the master.",
+  "why": "The path crosses five files (run, can/timing, dock, damiao/bus, damiao/motor) and goes through the bus twice; the order is only visible end to end.",
+  "kind": "pipeline",
+  "nodes": [
+    {"id": "master", "label": "bus master", "tldr": "Robot software writing to vcan0", "explain": "The robot's own driver (openarm_can, keel, the wave example), unchanged. Its write returns at once, as on a real CAN controller.", "anchors": [], "outside": true},
+    {"id": "recv", "label": "Socket::try_recv", "tldr": "Read a classic or CAN FD frame", "explain": "A raw SocketCAN socket on the robot file's interface.", "anchors": ["drydock/can::Socket::try_recv"]},
+    {"id": "push", "label": "Timeline::push", "tldr": "Queue the frame on its bus", "explain": "The frame joins the bus's queue with the time it became ready.", "anchors": ["drydock/can/timing::Timeline::push"]},
+    {"id": "arb", "label": "arbitration and bit time", "tldr": "Lowest id first, for its bits' duration", "explain": "When the bus frees, the waiting frame with the lowest id starts. Its length is counted bit by bit (stuffing, CRC), at the nominal rate and, for CAN FD data, the data rate.", "anchors": ["drydock/can/timing::Timeline::advance", "drydock/can/timing::bits"], "focus": true},
+    {"id": "addr", "label": "Motors::addressee", "tldr": "Which motor the frame is for", "explain": "By id: a motor's own id, 0x7FF with the id inside (registers), or another mode's id. CAN FD frames to classic-CAN motors are ignored, and said. A broken or lossy link drops it here.", "anchors": ["drydock/damiao/bus::Motors::addressee", "drydock/dock::Drydock::deliver"]},
+    {"id": "sense", "label": "Drivetrain::sense", "tldr": "Joint angle as the motor's encoder reads it", "explain": "MuJoCo's joint position and velocity, through the transmission and the encoder's errors (delay, bias, noise, counts).", "anchors": ["drydock/drivetrain::Drivetrain::sense", "drydock/effects::Encoder::sense"]},
+    {"id": "fw", "label": "Motor::on_frame", "tldr": "Firmware acts and builds its answer", "explain": "Enable, disable, a new MIT command, a register read or write. The command is kept for the physics step; the answer is feedback (position, velocity, torque, temperatures) or a register's value.", "anchors": ["drydock/damiao/motor::Motor::on_frame", "drydock/damiao/motor::Motor::on_register", "drydock/damiao/motor::Motor::feedback"]},
+    {"id": "reply", "label": "answer queued", "tldr": "Ready reply_us after the frame arrived", "explain": "The answer is pushed on the same timeline and competes for the bus like any frame.", "anchors": ["drydock/run::realtime"]},
+    {"id": "send", "label": "Socket::send", "tldr": "Answer reaches the master", "explain": "Once it has crossed, the answer is written to the socket for the master to read.", "anchors": ["drydock/can::Socket::send"]}
+  ],
+  "edges": [
+    {"from": "master", "to": "recv", "label": "CAN frame"},
+    {"from": "push", "to": "arb", "label": "queued frames"},
+    {"from": "arb", "to": "addr", "label": "crossed frame"},
+    {"from": "sense", "to": "fw", "label": "(θ, θ̇)"},
+    {"from": "addr", "to": "fw", "label": "motor index"},
+    {"from": "fw", "to": "reply", "label": "answer frame"},
+    {"from": "reply", "to": "arb", "label": "answer competes for bus"},
+    {"from": "arb", "to": "send", "label": "crossed answer"}
+  ]
+}

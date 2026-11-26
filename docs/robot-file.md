@@ -100,3 +100,28 @@ power: { volts: 5.0, battery: true }
   battery with its input-voltage shutdown turned off, as the Microduck has.
   `battery: true` makes the supply a battery, which sags behind its `ohms`
   as the motors draw and takes back what they give.
+
+## EtherCAT lines
+
+CiA 402 servo drives sit on EtherCAT lines, under `ethercat`, beside or
+instead of the other buses ([EtherCAT](ethercat.md)):
+
+```yaml
+ethercat:
+  - interface: ecs0           # drydock's end of a veth pair; the master opens the other
+    drives:                   # in the order the cable runs through them
+      - { joint: base, rated_torque: 10, peak_torque: 30, gains: { kp: 300, kd: 10, kv: 5 } }
+      - { joint: elbow, rated_torque: 5, peak_torque: 15, gains: { kp: 150, kd: 4, kv: 2 } }
+```
+
+- `interface`: drydock opens it raw, which needs CAP_NET_RAW: root,
+  `setcap cap_net_raw+ep` on drydock, or a network namespace of its own.
+- A drive: `joint`; `rated_torque`, N m, what its torques (0x6071, 0x6077)
+  are thousandths of (0x6076); `peak_torque`, N m, the most it gives, where
+  its max torque (0x6072) starts; `gains`, its loops' tuning: CSP's `kp`
+  (N m/rad) and `kd` (N m s/rad), CSV's `kv` (N m s/rad).
+- Optional: `counts_per_turn`, its encoder's counts per motor turn (2^17 by
+  default; 0x608F); `vendor`, `product`, `revision`, `name`, its identity
+  in its EEPROM and 0x1018 (zero and "drydock CiA 402 drive" by default);
+  `transmission` and `encoder`, as a motor's. Each drive's serial number is
+  its place on the line, from 1.

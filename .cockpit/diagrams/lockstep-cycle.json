@@ -1,0 +1,28 @@
+{
+  "question": "When does physics advance in lockstep mode?",
+  "tldr": "Once every motor has heard from its master, before the next read.",
+  "answer": "Frames take no time and are answered at once. When every motor on every bus has had a frame, the cycle is done: if it ended with a write, physics advances now; if with a read, it advances just before the next read, so writes sent in between act during the step.",
+  "why": "The 'owed' flag makes the order subtle: a read-ended cycle defers its step. Drawing it shows why a read-then-write master sees its writes' effect on the next read.",
+  "kind": "loop",
+  "rate": "every frame or packet the masters send; physics advances 1/hz per cycle",
+  "nodes": [
+    {"id": "start", "label": "lockstep", "tldr": "Started with --lockstep <hz>", "explain": "Computes how many timesteps make one period; the period must be a whole number of them.", "anchors": ["drydock/run::lockstep", "drydock/run::steps_per_period"], "start": true},
+    {"id": "wait", "label": "wait_any", "tldr": "Block until a master sends", "explain": "No timeout: time stands still while no master sends.", "anchors": ["drydock/poll::wait_any"]},
+    {"id": "owed_run", "label": "run owed step", "tldr": "Before a read, run the deferred cycle", "explain": "If this frame reads and the last cycle ended with a read, physics advances one period now, so the read sees what the writes in between did.", "anchors": ["drydock/run::Lockstep::deliver", "drydock/run::Lockstep::run"], "focus": true},
+    {"id": "deliver", "label": "deliver", "tldr": "Motors answer at once, current state", "explain": "CAN frames, Dynamixel packets or EtherCAT frames go to the dock as in real time, with no bus time.", "anchors": ["drydock/dock::Drydock::deliver", "drydock/dock::Drydock::deliver_packet", "drydock/dock::Drydock::deliver_frame"]},
+    {"id": "done", "label": "Drydock::cycle_done", "tldr": "Has every motor been heard since last?", "explain": "Each bus keeps a 'heard' flag per motor, set on delivery; a master that leaves a motor out stalls time.", "anchors": ["drydock/dock::Drydock::cycle_done"]},
+    {"id": "write_run", "label": "write ends cycle: step now", "tldr": "Write-only masters still move time", "explain": "A cycle ended by a write runs physics at once.", "anchors": ["drydock/run::Lockstep::run", "drydock/dock::Drydock::step"]},
+    {"id": "owed", "label": "owed", "tldr": "A read-ended cycle not yet stepped", "explain": "Set when a read completes a cycle; cleared when its physics runs before the next read.", "anchors": ["drydock/run::Lockstep"], "carries": true},
+    {"id": "end", "label": "killed", "tldr": "Runs until stopped", "explain": "Ends on Ctrl-C or a socket error.", "anchors": ["drydock::main"], "end": true}
+  ],
+  "edges": [
+    {"from": "start", "to": "wait", "label": "sockets"},
+    {"from": "wait", "to": "owed_run", "label": "frame, reads?"},
+    {"from": "owed", "to": "owed_run", "label": "owed flag"},
+    {"from": "owed_run", "to": "deliver", "label": "stepped world"},
+    {"from": "deliver", "to": "done", "label": "heard flags"},
+    {"from": "done", "to": "write_run", "label": "cycle done, by a write"},
+    {"from": "done", "to": "owed", "label": "cycle done, by a read", "next": true},
+    {"from": "write_run", "to": "end", "label": "error"}
+  ]
+}

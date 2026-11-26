@@ -1,2 +1,4 @@
 target/
 examples/openarm/hold
+# MuJoCo's own log of warnings, written where drydock runs.
+MUJOCO_LOG.TXT

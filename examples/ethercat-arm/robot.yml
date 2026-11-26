@@ -1,0 +1,11 @@
+# A three-joint arm on one EtherCAT line: three CiA 402 drives, each on its
+# own ET1100, the cable running base, shoulder, elbow. drydock opens ecs0
+# raw; the master opens the veth pair's other end, ecm0.
+scene: arm.xml
+keyframe: home
+ethercat:
+  - interface: ecs0
+    drives:
+      - { joint: base, rated_torque: 10, peak_torque: 30, gains: { kp: 300, kd: 10, kv: 5 } }
+      - { joint: shoulder, rated_torque: 10, peak_torque: 30, gains: { kp: 300, kd: 10, kv: 5 } }
+      - { joint: elbow, rated_torque: 5, peak_torque: 15, gains: { kp: 150, kd: 4, kv: 2 } }

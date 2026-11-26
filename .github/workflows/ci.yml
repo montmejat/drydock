@@ -48,11 +48,15 @@ jobs:
 
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
+      # tests/ethercat.rs runs each test in a network namespace of its own
+      # (`unshare -rn`), which Ubuntu 24.04's AppArmor forbids users by default.
+      - run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - run: cargo test
 
       - name: What drydock supports of each protocol
         run: |
-          for protocol in "damiao:Damiao's protocol" "dynamixel:Dynamixel's Protocol 2.0 and the XL330"; do
+          for protocol in "damiao:Damiao's protocol" "dynamixel:Dynamixel's Protocol 2.0 and the XL330" \
+            "ethercat:CiA 402 drives on EtherCAT"; do
             file=${protocol%%:*} title=${protocol#*:}
             cargo test --test $file -- --test-threads=1 2>/dev/null | awk '
               /^test .* \.\.\. / {
@@ -118,6 +122,36 @@ jobs:
           kill $drydock && wait $drydock || true
           grep -q '^master ids: 0x11 0x12 0x13 0x14 0x15 0x16 0x17 0x18$' hold.log || { echo "openarm_can didn't find all eight motors"; cat openarm.log; exit 1; }
           tail -n 1 hold.log | awk '{ if ($8 < 1.45 || $8 > 1.75) { print "the elbow isn'"'"'t holding a quarter turn: " $8; exit 1 } }'
+
+      # SOEM (2.0.1), a second EtherCAT master besides tests/ethercat.rs's
+      # ethercrab, on the EtherCAT arm, in a network namespace of its own.
+      # slaveinfo must find the three drives and read their PDO mapping
+      # over CoE. simple_ng must take them to Operational and get a working
+      # counter of 9 on every cycle for 5 s.
+      - name: EtherCAT drives, driven by SOEM
+        run: |
+          s=~/.cache/drydock/soem-2.0.1
+          git clone -q --depth 1 --branch v2.0.1 https://github.com/OpenEtherCATsociety/SOEM $s/src
+          cmake -S $s/src -B $s/build -DCMAKE_BUILD_TYPE=Release -DSOEM_BUILD_SAMPLES=ON > /dev/null
+          cmake --build $s/build -j > /dev/null
+          unshare -rn sh -c "
+            ip link add ecm0 type veth peer name ecs0 && ip link set ecm0 up && ip link set ecs0 up
+            ./target/release/drydock examples/ethercat-arm/robot.yml > ethercat.log 2>&1 &
+            drydock=\$!
+            timeout 60 sh -c 'until grep -q ecs0 ethercat.log; do sleep 0.2; done'
+            $s/build/samples/slaveinfo/slaveinfo ecm0 -map > slaveinfo.log 2>&1
+            timeout 5 $s/build/samples/simple_ng/simple_ng ecm0 > simple_ng.log 2>&1
+            kill \$drydock
+          " || true
+          tr '\r' '\n' < simple_ng.log > cycles.log
+          fail() { echo "$1"; cat ethercat.log slaveinfo.log; tail -n 20 cycles.log; exit 1; }
+          grep -q '^3 slaves found and configured' slaveinfo.log || fail "slaveinfo didn't find the three drives"
+          grep -q '^Calculated workcounter 9' slaveinfo.log || fail "slaveinfo expects a working counter other than 9"
+          [ $(grep -c '0x6041:0x00' slaveinfo.log) = 3 ] || fail "slaveinfo didn't read every drive's PDO mapping"
+          grep -q 'all slaves are now operational' cycles.log || fail "simple_ng didn't take the drives to Operational"
+          [ $(grep -c 'WKC 9 ' cycles.log) -gt 500 ] || fail "simple_ng exchanged fewer than 500 cycles"
+          grep -qE 'wrong \(expected|^\* Slave' cycles.log && fail "a drive missed a cycle or dropped out of Operational"
+          true
 
       # Pollen's servo library (rustypot 1.8.0, as the Microduck's runtime
       # uses it) driving drydock's XL330 through its serial port: it must

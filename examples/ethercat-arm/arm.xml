@@ -1,0 +1,33 @@
+<!-- A three-joint arm for drydock's EtherCAT drives: a base that turns, a
+     shoulder and an elbow, each driven straight by its motor (no gearbox). -->
+<mujoco model="ethercat-arm">
+  <compiler angle="radian"/>
+  <option timestep="0.0005" integrator="implicitfast"/>
+  <default>
+    <joint armature="0.01" damping="0.05" frictionloss="0.02"/>
+    <geom type="capsule" rgba="0.75 0.77 0.8 1"/>
+  </default>
+  <worldbody>
+    <light pos="0 0 2" dir="0 0 -1"/>
+    <geom type="plane" size="1 1 0.1" rgba="0.3 0.3 0.32 1"/>
+    <body name="pedestal" pos="0 0 0">
+      <geom type="cylinder" size="0.08 0.05" pos="0 0 0.05" mass="5"/>
+      <body name="turret" pos="0 0 0.1">
+        <joint name="base" type="hinge" axis="0 0 1"/>
+        <geom type="cylinder" size="0.06 0.05" pos="0 0 0.05" mass="2"/>
+        <body name="upper_arm" pos="0 0 0.12">
+          <joint name="shoulder" type="hinge" axis="0 1 0"/>
+          <geom fromto="0 0 0 0 0 0.3" size="0.04" mass="1.5"/>
+          <body name="forearm" pos="0 0 0.3">
+            <joint name="elbow" type="hinge" axis="0 1 0"/>
+            <geom fromto="0 0 0 0 0 0.25" size="0.03" mass="0.8"/>
+            <site name="tool" pos="0 0 0.25"/>
+          </body>
+        </body>
+      </body>
+    </body>
+  </worldbody>
+  <keyframe>
+    <key name="home" qpos="0 0 0"/>
+  </keyframe>
+</mujoco>

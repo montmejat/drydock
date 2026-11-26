@@ -1,0 +1,29 @@
+{
+  "question": "How do a master's targets become torque on a joint and come back as positions?",
+  "tldr": "Frame writes the dictionary; physics reads it, then writes actuals back.",
+  "answer": "The object dictionary sits between two clocks: each process data frame copies the master's outputs into it and the drive's inputs out of it, and each physics step reads the mode and target from it, gives a torque, and writes the new actual position and velocity into it.",
+  "why": "Frames and physics steps run at different times in different functions; the picture shows that the dictionary is the only thing between them, so the master always reads what the last physics step wrote.",
+  "kind": "dataflow",
+  "nodes": [
+    {"id": "frame", "label": "process data frame", "tldr": "master's outputs in, inputs out", "explain": "One LRW datagram each cycle: the chip's FMMU puts this drive's slice in its output sync manager (SM2) and takes its inputs from SM3.", "anchors": ["drydock/dock::Drydock::deliver_frame", "drydock/ethercat/drive::Drive::frame_done"], "outside": true},
+    {"id": "outputs", "label": "Drive::outputs", "tldr": "RxPDO bytes into the dictionary, in Op", "explain": "Copies SM2 into the objects mapped by 0x1C12 (controlword 0x6040, targets 0x607A/0x60FF/0x6071, mode 0x6060). Only in Operational.", "anchors": ["drydock/ethercat/drive::Drive::outputs", "drydock/ethercat/drive::Drive::mapped"]},
+    {"id": "modes", "label": "modes, controlword", "tldr": "mode runs if supported; state machine steps", "explain": "0x6061 follows 0x6060 when it's CSP, CSV or CST. The controlword moves CiA 402's state machine.", "anchors": ["drydock/ethercat/drive::Drive::modes", "drydock/ethercat/drive::Drive::controlword"], "detail": "cia402-state-machine"},
+    {"id": "od", "label": "object dictionary", "tldr": "targets, mode, actuals, statusword", "explain": "The drive's CoE objects. Frames and physics steps meet only here: each reads what the other wrote last.", "anchors": ["drydock/ethercat/coe::Dictionary"], "carries": true, "focus": true},
+    {"id": "sense", "label": "Drive::sense", "tldr": "encoder reading into 0x6064, 0x606C, 0x6077", "explain": "The drivetrain's encoder reading, in counts, becomes the actual position and velocity; the torque the motor gave becomes 0x6077, and the target minus position the following error (0x60F4). Then the inputs are refreshed.", "anchors": ["drydock/ethercat/drive::Drive::sense"]},
+    {"id": "law", "label": "Drive::law", "tldr": "CSP, CSV or CST torque, up to 0x6072", "explain": "In Operation Enabled: CSP is a PD loop on the position error, CSV a P loop on velocity, CST the torque asked. Clamped to the max torque (0x6072). Also runs the watchdog and the following error check.", "anchors": ["drydock/ethercat/drive::Drive::law", "drydock/ethercat/drive::Drive::following"]},
+    {"id": "step", "label": "Drydock::step", "tldr": "drivetrain limits torque; MuJoCo moves joint", "explain": "The physics step, every 0.5 ms: the drivetrain turns the asked torque into what the motor gives, and MuJoCo moves the joint under it.", "anchors": ["drydock/dock::Drydock::step"], "detail": "physics-step"},
+    {"id": "inputs", "label": "Drive::inputs", "tldr": "TxPDO objects into SM3, from Safe-Op", "explain": "Updates the statusword, then copies the objects mapped by 0x1C13 (statusword, actual position, velocity, torque, mode, error code) into SM3 for the frame to take.", "anchors": ["drydock/ethercat/drive::Drive::inputs", "drydock/ethercat/drive::Drive::statusword"]}
+  ],
+  "edges": [
+    {"from": "frame", "to": "outputs", "label": "SM2 bytes"},
+    {"from": "outputs", "to": "od", "label": "0x6040, targets, 0x6060"},
+    {"from": "outputs", "to": "modes", "label": "calls"},
+    {"from": "modes", "to": "od", "label": "0x6061, CiA 402 state"},
+    {"from": "od", "to": "law", "label": "state, mode, target"},
+    {"from": "law", "to": "step", "label": "torque asked"},
+    {"from": "step", "to": "sense", "label": "joint angle, speed"},
+    {"from": "sense", "to": "od", "label": "0x6064, 0x606C, 0x6077, 0x60F4", "next": true},
+    {"from": "od", "to": "inputs", "label": "statusword, actuals"},
+    {"from": "inputs", "to": "frame", "label": "SM3 bytes"}
+  ]
+}
