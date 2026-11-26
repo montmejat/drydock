@@ -8,7 +8,8 @@
 //! so it needs neither root nor the host's interfaces.
 //!
 //! Names start with what they're about: `bus_` (the line, the chip),
-//! `al_` (the EtherCAT states), `coe_` (the mailbox), `cia402_` (the drive).
+//! `al_` (the EtherCAT states), `coe_` (the mailbox), `cia402_` (the drive),
+//! `fault_` (what a scenario breaks).
 
 use std::process::Command;
 use std::time::Duration;
@@ -17,6 +18,7 @@ use drydock::dock::Drydock;
 use drydock::ethercat::Socket;
 use drydock::robot::Robot;
 use drydock::run::{self, EthercatLine};
+use drydock::scenario::Scenario;
 use ethercrab::error::{CoeAbortCode, Error, MailboxError};
 use ethercrab::std::{ethercat_now, tx_rx_task};
 use ethercrab::subdevice_group::{Op, PreOp, SubDeviceGroup};
@@ -36,6 +38,11 @@ static PDU: PduStorage<16, { PduStorage::element_size(1100) }> = PduStorage::new
 /// drydock serving the example arm on `ecs0` in real time. The test binary
 /// runs itself again, inside, on this one test.
 fn sandboxed(name: &str, test: impl FnOnce(&MainDevice)) {
+    sandboxed_with(name, None, test)
+}
+
+/// As `sandboxed`, with what happens to the arm: a scenario's YAML.
+fn sandboxed_with(name: &str, scenario: Option<&'static str>, test: impl FnOnce(&MainDevice)) {
     if std::env::var_os("DRYDOCK_NETNS").is_none() {
         let exe = std::env::current_exe().unwrap();
         let status = Command::new("unshare")
@@ -64,7 +71,10 @@ fn sandboxed(name: &str, test: impl FnOnce(&MainDevice)) {
     std::thread::spawn(move || {
         let line = EthercatLine { name: "ecs0".into(), socket: Socket::open("ecs0").unwrap() };
         let robot = Robot::load(concat!(env!("CARGO_MANIFEST_DIR"), "/examples/ethercat-arm/robot.yml")).unwrap();
-        let dock = Drydock::load(&robot).unwrap();
+        let mut dock = Drydock::load(&robot).unwrap();
+        if let Some(yaml) = scenario {
+            dock.set_scenario(Scenario::parse(yaml, &robot.joints()).unwrap());
+        }
         ready.send(()).unwrap();
         run::realtime(dock, &[], &mut [], &[line], None)
     });
@@ -400,6 +410,100 @@ fn cia402_a_following_error_faults_until_reset() {
             }
         });
         assert_eq!((state, code), (0x40, 0), "a fault reset: Switch On Disabled, the error cleared");
+    });
+}
+
+/* ── what breaks ── */
+
+/// Runs CST cycles on the base at `torque` ‰: its last raw statusword, actual
+/// velocity and torque, and its error code (0x603F).
+fn push_base(master: &MainDevice, group: &Group<Op>, torque: i16, n: usize) -> (u16, i32, i16, u16) {
+    let mut seen = (0, 0, 0, 0);
+    cycles(master, group, n, |i, inputs, out| {
+        if i == 0 {
+            out[10..12].copy_from_slice(&torque.to_le_bytes());
+            out[12] = 10;
+            let (speed, actual) = velocity_torque(inputs);
+            seen = (
+                u16::from_le_bytes([inputs[0], inputs[1]]),
+                speed,
+                actual,
+                u16::from_le_bytes([inputs[13], inputs[14]]),
+            );
+        }
+    });
+    seen
+}
+
+#[test]
+fn fault_a_disconnected_drive_cuts_the_line_after_it() {
+    let scenario = "faults: [{ joint: shoulder, fault: disconnected, at: 0 s }]";
+    sandboxed_with("fault_a_disconnected_drive_cuts_the_line_after_it", Some(scenario), |master| {
+        // The frame turns at the base: neither the shoulder nor the elbow sees it.
+        assert_eq!(init(master).len(), 1);
+    });
+}
+
+#[test]
+fn fault_a_dead_motor_gives_no_torque_and_still_says_it_is_enabled() {
+    let scenario = "faults: [{ joint: base, fault: dead, at: 0 s }]";
+    sandboxed_with("fault_a_dead_motor_gives_no_torque_and_still_says_it_is_enabled", Some(scenario), |master| {
+        let group = smol::block_on(init(master).into_op(master)).expect("Operational");
+        enable(master, &group);
+        let (sw, speed, torque, _) = push_base(master, &group, 100, 50);
+        assert_eq!(sw & 0x6F, 0x27, "Operation Enabled");
+        assert_eq!(torque, 0, "the actual torque, as its current sensors see it");
+        assert!(speed.abs() < 100, "the base doesn't turn: {speed} counts/s");
+    });
+}
+
+#[test]
+fn fault_a_shorted_motor_trips_the_drive_as_soon_as_it_drives() {
+    let scenario = "faults: [{ joint: base, fault: shorted, at: 0 s }]";
+    sandboxed_with("fault_a_shorted_motor_trips_the_drive_as_soon_as_it_drives", Some(scenario), |master| {
+        let group = smol::block_on(init(master).into_op(master)).expect("Operational");
+        enable(master, &group);
+        let (sw, _, torque, code) = push_base(master, &group, 100, 20);
+        assert_eq!((sw & 0x6F, code, torque), (0x08, 0x2320, 0), "Fault: short circuit, and no torque");
+    });
+}
+
+#[test]
+fn fault_the_supply_off_clears_voltage_enabled_and_the_torque() {
+    let scenario = "faults: [{ supply: off, at: 0 s }]";
+    sandboxed_with("fault_the_supply_off_clears_voltage_enabled_and_the_torque", Some(scenario), |master| {
+        let group = smol::block_on(init(master).into_op(master)).expect("Operational");
+        enable(master, &group);
+        let (sw, _, torque, _) = push_base(master, &group, 100, 20);
+        assert_eq!((sw & 0x10, torque), (0, 0), "statusword {sw:#06x}");
+    });
+}
+
+#[test]
+fn fault_a_lossy_link_loses_about_one_frame_in_ten() {
+    // From 1 s: the line comes up first, as a master's start-up doesn't retry.
+    let scenario = "faults: [{ joint: elbow, fault: lossy, at: 1 s }]";
+    sandboxed_with("fault_a_lossy_link_loses_about_one_frame_in_ten", Some(scenario), |master| {
+        let group = smol::block_on(init(master).into_op(master)).expect("Operational");
+        // drydock's clock started before the master did: a second from now,
+        // the fault is on.
+        let start = std::time::Instant::now();
+        let (mut sent, mut lost) = (0, 0);
+        smol::block_on(async {
+            while start.elapsed() < Duration::from_secs(1) {
+                let _ = group.tx_rx(master).await;
+                smol::Timer::after(Duration::from_millis(1)).await;
+            }
+            while sent < 1000 {
+                sent += 1;
+                if group.tx_rx(master).await.is_err() {
+                    lost += 1;
+                }
+                smol::Timer::after(Duration::from_millis(1)).await;
+            }
+        });
+        eprintln!("{lost} of {sent} cycles lost");
+        assert!((50..=160).contains(&lost), "{lost} of {sent} lost");
     });
 }
 

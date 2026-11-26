@@ -102,12 +102,16 @@ sudo setcap cap_net_raw+ep target/release/drydock
 
 SOEM's `slaveinfo ecm0 -map` lists the three drives with their sync
 managers, FMMUs and PDO mapping, read over CoE, and brings them to
-Safe-Operational. Its `simple_ng ecm0` takes them to Operational and
+Safe-Operational. It takes 23 s: it asks each mapped object's name over
+SDO information, which drydock doesn't have, and waits out SOEM's 0.7 s
+mailbox timeout on each (`slaveinfo ecm0` alone takes 0.02 s). Its `simple_ng ecm0` takes them to Operational and
 exchanges process data each cycle: a working counter of 9.
 
 [`tests/ethercat.rs`](../tests/ethercat.rs) runs ethercrab against the arm
 the same way, one test per feature (the AL states and the SM watchdog,
-CoE and PDO remapping, CSP, CSV, CST, quick stop, the following error) and
+CoE and PDO remapping, CSP, CSV, CST, quick stop, the following error,
+and what a scenario breaks: a drive disconnected, dead, shorted, a lossy
+link, the supply off) and
 an ignored test for each gap below. Each test runs itself in a network
 namespace of its own, which needs unprivileged user namespaces: on Ubuntu
 24.04, `sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0`.
