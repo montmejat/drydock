@@ -105,8 +105,29 @@ managers, FMMUs and PDO mapping, read over CoE, and brings them to
 Safe-Operational. It takes 23 s: it asks each mapped object's name over
 SDO information, which drydock doesn't have, and waits out SOEM's 0.7 s
 mailbox timeout on each (`slaveinfo ecm0` alone takes 0.02 s). Its `simple_ng ecm0` takes them to Operational and
-exchanges process data each cycle: a working counter of 9. CI runs both,
-with SOEM 2.0.1, on every pull request.
+exchanges process data each cycle: a working counter of 9. Neither
+enables a drive: their outputs stay zero, so the drives stay in Switch On
+Disabled.
+
+[`examples/ethercat-arm/enable.c`](../examples/ethercat-arm/enable.c) does,
+as a CiA 402 master would with SOEM. Over SDO in Pre-Op, it checks that
+each drive has CSP (0x6502), reads its counts a turn (0x608F) and sets CSP
+(0x6060). In Operational, it enables each drive with the controlword,
+moves the shoulder 0.5 rad, then disables them again. It exits 1, saying
+why, if any step fails. Build it against SOEM 2.0.1, installed to
+`$soem`, then run it in the namespace above in place of `slaveinfo`:
+
+```sh
+cc -O2 -I $soem/include -I $soem/include/soem examples/ethercat-arm/enable.c $soem/lib/libsoem.a \
+  -lm -lpthread -o examples/ethercat-arm/enable
+examples/ethercat-arm/enable ecm0
+```
+
+SOEM sends no mailbox to a drive until it has read that drive's state as
+Pre-Op itself (`ecx_readstate`), even though the drive is already there.
+So the program reads the states before its first SDO.
+
+CI runs all three, with SOEM 2.0.1, on every pull request.
 
 [`tests/ethercat.rs`](../tests/ethercat.rs) runs ethercrab against the arm
 the same way, one test per feature (the AL states and the SM watchdog,

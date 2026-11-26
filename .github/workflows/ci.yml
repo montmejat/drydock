@@ -127,13 +127,17 @@ jobs:
       # ethercrab, on the EtherCAT arm, in a network namespace of its own.
       # slaveinfo must find the three drives and read their PDO mapping
       # over CoE. simple_ng must take them to Operational and get a working
-      # counter of 9 on every cycle for 5 s.
+      # counter of 9 on every cycle for 5 s. examples/ethercat-arm/enable.c
+      # must enable every drive through CiA 402 and move the shoulder.
       - name: EtherCAT drives, driven by SOEM
         run: |
           s=~/.cache/drydock/soem-2.0.1
           git clone -q --depth 1 --branch v2.0.1 https://github.com/OpenEtherCATsociety/SOEM $s/src
           cmake -S $s/src -B $s/build -DCMAKE_BUILD_TYPE=Release -DSOEM_BUILD_SAMPLES=ON > /dev/null
           cmake --build $s/build -j > /dev/null
+          cmake --install $s/build --prefix $s > /dev/null
+          cc -O2 -Wall -Wextra -Werror -I $s/include -I $s/include/soem examples/ethercat-arm/enable.c $s/lib/libsoem.a \
+            -lm -lpthread -o examples/ethercat-arm/enable
           unshare -rn sh -c "
             ip link add ecm0 type veth peer name ecs0 && ip link set ecm0 up && ip link set ecs0 up
             ./target/release/drydock examples/ethercat-arm/robot.yml > ethercat.log 2>&1 &
@@ -141,17 +145,19 @@ jobs:
             timeout 60 sh -c 'until grep -q ecs0 ethercat.log; do sleep 0.2; done'
             $s/build/samples/slaveinfo/slaveinfo ecm0 -map > slaveinfo.log 2>&1
             timeout 5 $s/build/samples/simple_ng/simple_ng ecm0 > simple_ng.log 2>&1
+            examples/ethercat-arm/enable ecm0 > enable.log 2>&1; echo \$? > enable.exit
             kill \$drydock
           " || true
           tr '\r' '\n' < simple_ng.log > cycles.log
-          fail() { echo "$1"; cat ethercat.log slaveinfo.log; tail -n 20 cycles.log; exit 1; }
+          fail() { echo "$1"; cat ethercat.log slaveinfo.log enable.log; tail -n 20 cycles.log; exit 1; }
           grep -q '^3 slaves found and configured' slaveinfo.log || fail "slaveinfo didn't find the three drives"
           grep -q '^Calculated workcounter 9' slaveinfo.log || fail "slaveinfo expects a working counter other than 9"
           [ $(grep -c '0x6041:0x00' slaveinfo.log) = 3 ] || fail "slaveinfo didn't read every drive's PDO mapping"
           grep -q 'all slaves are now operational' cycles.log || fail "simple_ng didn't take the drives to Operational"
           [ $(grep -c 'WKC 9 ' cycles.log) -gt 500 ] || fail "simple_ng exchanged fewer than 500 cycles"
           grep -qE 'wrong \(expected|^\* Slave' cycles.log && fail "a drive missed a cycle or dropped out of Operational"
-          true
+          cat enable.log
+          [ "$(cat enable.exit)" = 0 ] || fail "SOEM couldn't enable the drives and move the shoulder"
 
       # Pollen's servo library (rustypot 1.8.0, as the Microduck's runtime
       # uses it) driving drydock's XL330 through its serial port: it must
