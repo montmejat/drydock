@@ -105,7 +105,8 @@ managers, FMMUs and PDO mapping, read over CoE, and brings them to
 Safe-Operational. It takes 23 s: it asks each mapped object's name over
 SDO information, which drydock doesn't have, and waits out SOEM's 0.7 s
 mailbox timeout on each (`slaveinfo ecm0` alone takes 0.02 s). Its `simple_ng ecm0` takes them to Operational and
-exchanges process data each cycle: a working counter of 9.
+exchanges process data each cycle: a working counter of 9. CI runs both,
+with SOEM 2.0.1, on every pull request.
 
 [`tests/ethercat.rs`](../tests/ethercat.rs) runs ethercrab against the arm
 the same way, one test per feature (the AL states and the SM watchdog,

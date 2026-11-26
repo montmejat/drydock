@@ -31,7 +31,7 @@
       "status": "partial",
       "description": "CiA 402 servo drives, each behind a simulated ET1100 chip, in a line on a veth interface: AL states, SII EEPROM, CoE SDOs, PDOs, and CSP/CSV/CST modes driving joints.",
       "modules": ["drydock/ethercat"],
-      "note": "In draft PR #15. 17 tests, scenario faults included, and 7 ignored gaps (distributed clocks, wire time, bit mappings, segmented SDOs, SDO info, emergencies, a real drive's objects). SOEM's slaveinfo and simple_ng work locally; not yet run in CI."
+      "note": "In draft PR #15. 17 tests, scenario faults included, and 7 ignored gaps (distributed clocks, wire time, bit mappings, segmented SDOs, SDO info, emergencies, a real drive's objects). CI runs ethercrab (the tests) and SOEM's slaveinfo and simple_ng."
     },
     {
       "id": "physics",
