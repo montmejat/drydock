@@ -1,0 +1,29 @@
+{
+  "question": "What must a master set up before a drive reaches Operational?",
+  "tldr": "Init, Pre-Op, Safe-Op, Op: each step checked, or refused with a code.",
+  "answer": "The master asks for each AL state in turn through AL Control (0x0120). The drive checks what that state needs (mailbox sync managers for Pre-Op, process data sync managers matching the PDOs for Safe-Op) and either moves on or refuses with a code in AL Status Code (0x0134).",
+  "why": "The checks, the codes and what each state enables are spread over the chip, the firmware and CoE; the picture shows what the master must have done before each step.",
+  "kind": "pipeline",
+  "nodes": [
+    {"id": "master", "label": "master writes AL Control", "tldr": "0x0120: the state it wants", "explain": "The master writes the state it wants into the chip's AL Control register and reads AL Status (0x0130) until the drive is there, or the error bit says it refused.", "anchors": ["drydock/ethercat/esc::Esc::al_control"], "outside": true},
+    {"id": "init", "label": "Init", "tldr": "master counts drives, reads their EEPROM", "explain": "No mailbox, no process data. The master gives each drive a station address and reads its SII EEPROM: identity, mailbox areas, default PDOs.", "anchors": ["drydock/ethercat/sii::image", "drydock/ethercat/esc::Esc::datagram"], "start": true},
+    {"id": "chk_mbx", "label": "check_mailboxes", "tldr": "SM0/SM1 where the EEPROM says, or 0x0016", "explain": "Pre-Op needs the mailbox sync managers set as the EEPROM gave them; else Pre-Op is refused with 0x0016 (invalid mailbox configuration).", "anchors": ["drydock/ethercat/drive::Drive::check_mailboxes"]},
+    {"id": "preop", "label": "Pre-Operational", "tldr": "mailbox works: SDOs configure the drive", "explain": "The master reads and writes objects over CoE: PDO mapping (0x1600, 0x1A00), assignment (0x1C12, 0x1C13), mode (0x6060), limits. Mapping can only change here.", "anchors": ["drydock/ethercat/drive::Drive::mailbox", "drydock/ethercat/coe::handle"]},
+    {"id": "chk_pd", "label": "check_process_data", "tldr": "SM2/SM3 fit the PDOs, or 0x001D/0x001E", "explain": "Safe-Op needs the process data sync managers sized to the PDOs assigned; else it's refused with 0x001D (outputs) or 0x001E (inputs).", "anchors": ["drydock/ethercat/drive::Drive::check_process_data", "drydock/ethercat/drive::Drive::pdo_bytes"]},
+    {"id": "safeop", "label": "Safe-Operational", "tldr": "inputs flow; outputs are ignored", "explain": "The drive fills its inputs (statusword, positions) each frame, but the master's outputs don't act yet.", "anchors": ["drydock/ethercat/drive::Drive::inputs"]},
+    {"id": "op", "label": "Operational", "tldr": "outputs act: controlword and targets", "explain": "Each frame's outputs go into the object dictionary, then the controlword runs CiA 402's state machine. Only from here can the drive be enabled.", "anchors": ["drydock/ethercat/drive::Drive::outputs"], "focus": true, "detail": "cia402-state-machine"},
+    {"id": "wd", "label": "SM watchdog", "tldr": "no outputs for 100 ms: back to Safe-Op, 0x001B", "explain": "In Op, outputs must keep coming. If none arrive within the watchdog's time, the drive drops to Safe-Op with the error bit and code 0x001B, and turns its torque off.", "anchors": ["drydock/ethercat/drive::Drive::watchdog", "drydock/ethercat/drive::Drive::left_op"]}
+  ],
+  "edges": [
+    {"from": "master", "to": "init", "label": "0x01 Init"},
+    {"from": "master", "to": "chk_mbx", "label": "0x02 Pre-Op asked"},
+    {"from": "chk_mbx", "to": "preop", "label": "mailboxes good"},
+    {"from": "master", "to": "chk_pd", "label": "0x04 Safe-Op asked"},
+    {"from": "preop", "to": "chk_pd", "label": "PDOs assigned over SDO"},
+    {"from": "chk_pd", "to": "safeop", "label": "sync managers good"},
+    {"from": "master", "to": "op", "label": "0x08 Op asked"},
+    {"from": "safeop", "to": "op", "label": "valid outputs sent"},
+    {"from": "op", "to": "wd", "label": "time since last outputs"},
+    {"from": "wd", "to": "safeop", "label": "falls back"}
+  ]
+}
