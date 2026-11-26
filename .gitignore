@@ -1,4 +1,5 @@
 target/
 examples/openarm/hold
+examples/ethercat-arm/enable
 # MuJoCo's own log of warnings, written where drydock runs.
 MUJOCO_LOG.TXT
