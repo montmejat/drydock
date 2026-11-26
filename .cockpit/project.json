@@ -31,7 +31,7 @@
       "status": "partial",
       "description": "CiA 402 servo drives, each behind a simulated ET1100 chip, in a line on a veth interface: AL states, SII EEPROM, CoE SDOs, PDOs, and CSP/CSV/CST modes driving joints.",
       "modules": ["drydock/ethercat"],
-      "note": "Committed on the ethercat branch, not pushed. Only 3 tests (discovery, AL states, CSP) for what docs/ethercat.md says works; no ignored tests for its gaps; CI's support table leaves it out."
+      "note": "On the ethercat branch, not pushed. 12 tests and 7 ignored gaps (distributed clocks, wire time, bit mappings, segmented SDOs, SDO info, emergencies, a real drive's objects); not yet run in CI or against SOEM."
     },
     {
       "id": "physics",

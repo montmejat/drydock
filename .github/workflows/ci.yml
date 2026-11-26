@@ -48,11 +48,15 @@ jobs:
 
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
+      # tests/ethercat.rs runs each test in a network namespace of its own
+      # (`unshare -rn`), which Ubuntu 24.04's AppArmor forbids users by default.
+      - run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - run: cargo test
 
       - name: What drydock supports of each protocol
         run: |
-          for protocol in "damiao:Damiao's protocol" "dynamixel:Dynamixel's Protocol 2.0 and the XL330"; do
+          for protocol in "damiao:Damiao's protocol" "dynamixel:Dynamixel's Protocol 2.0 and the XL330" \
+            "ethercat:CiA 402 drives on EtherCAT"; do
             file=${protocol%%:*} title=${protocol#*:}
             cargo test --test $file -- --test-threads=1 2>/dev/null | awk '
               /^test .* \.\.\. / {

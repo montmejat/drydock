@@ -17,8 +17,9 @@ drydock speaks three protocols, and tries to speak each completely:
   PDO mapping, and CSP, CSV and CST. New, and not yet complete: see
   [docs/ethercat.md](docs/ethercat.md).
 
-Every feature is shown by a test in [`tests/damiao.rs`](tests/damiao.rs) and
-[`tests/dynamixel.rs`](tests/dynamixel.rs), and so is every gap: CI turns
+Every feature is shown by a test in [`tests/damiao.rs`](tests/damiao.rs),
+[`tests/dynamixel.rs`](tests/dynamixel.rs) and
+[`tests/ethercat.rs`](tests/ethercat.rs), and so is every gap: CI turns
 them into tables. The table, and what's not
 there yet, is in [docs/simulation.md](docs/simulation.md).
 

@@ -106,8 +106,11 @@ Safe-Operational. Its `simple_ng ecm0` takes them to Operational and
 exchanges process data each cycle: a working counter of 9.
 
 [`tests/ethercat.rs`](../tests/ethercat.rs) runs ethercrab against the arm
-the same way. Each test runs itself in a namespace of its own: it brings
-the line up, enables the drives, and moves the shoulder in CSP.
+the same way, one test per feature (the AL states and the SM watchdog,
+CoE and PDO remapping, CSP, CSV, CST, quick stop, the following error) and
+an ignored test for each gap below. Each test runs itself in a network
+namespace of its own, which needs unprivileged user namespaces: on Ubuntu
+24.04, `sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0`.
 
 ## The robot file
 
